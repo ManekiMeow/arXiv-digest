@@ -1,0 +1,5 @@
+import os
+
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+MAX_PAPERS_PER_THEME = 5
+ARXIV_MAX_RESULTS = 300
