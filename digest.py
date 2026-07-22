@@ -1,3 +1,4 @@
+import re
 import sys
 import json
 import logging
@@ -86,6 +87,45 @@ THEMES = [
         ],
         "exclude": [],
     },
+]
+
+
+WATCHED_AUTHORS = [
+    {"display": "Shihao Ru",               "given": "Shihao",    "family": "Ru"},
+    {"display": "Victor V. Albert",         "given": "Victor",    "family": "Albert"},
+    {"display": "Changhun Oh",              "given": "Changhun",  "family": "Oh"},
+    {"display": "Chuan-Feng Li",            "given": "Chuan-Feng","family": "Li"},
+    {"display": "Penghao Zhu",              "given": "Penghao",   "family": "Zhu"},
+    {"display": "Jonatan Bohr Brask",       "given": "Jonatan",   "family": "Brask"},
+    {"display": "Qin-Qin Wang",             "given": "Qin-Qin",   "family": "Wang"},
+    {"display": "Xiang Cheng",              "given": "Xiang",     "family": "Cheng"},
+    {"display": "Ulrik Lund Andersen",      "given": "Ulrik",     "family": "Andersen"},
+    {"display": "Kishor Bharti",            "given": "Kishor",    "family": "Bharti"},
+    {"display": "Anton Zeilinger",          "given": "Anton",     "family": "Zeilinger"},
+    {"display": "A.I. Lvovsky",             "given": "A.I.",      "family": "Lvovsky"},
+    {"display": "Damian Markham",           "given": "Damian",    "family": "Markham"},
+    {"display": "Armin Tavakoli",           "given": "Armin",     "family": "Tavakoli"},
+    {"display": "Taylor L. Hughes",         "given": "Taylor",    "family": "Hughes"},
+    {"display": "Adan Cabello",             "given": "Adan",      "family": "Cabello"},
+    {"display": "Man-Hong Yung",            "given": "Man-Hong",  "family": "Yung"},
+    {"display": "Renato Renner",            "given": "Renato",    "family": "Renner"},
+    {"display": "Xiaosong Ma",              "given": "Xiaosong",  "family": "Ma"},
+    {"display": "Chao-Yang Lu",             "given": "Chao-Yang", "family": "Lu"},
+    {"display": "Jonas S. Neergaard-Nielsen","given": "Jonas",    "family": "Neergaard-Nielsen"},
+    {"display": "Johannes Borregaard",      "given": "Johannes",  "family": "Borregaard"},
+    {"display": "Liang Jiang",              "given": "Liang",     "family": "Jiang"},
+    {"display": "Peng Xue",                 "given": "Peng",      "family": "Xue"},
+    {"display": "Hsin-Yuan Huang",          "given": "Hsin-Yuan", "family": "Huang"},
+    {"display": "Dong-Ling Deng",           "given": "Dong-Ling", "family": "Deng"},
+    {"display": "Shang Yu",                 "given": "Shang",     "family": "Yu"},
+    {"display": "Yu Meng",                  "given": "Yu",        "family": "Meng"},
+    {"display": "Junfeng Wang",             "given": "Junfeng",   "family": "Wang"},
+    {"display": "Akira Furusawa",           "given": "Akira",     "family": "Furusawa"},
+    {"display": "Jens Eisert",              "given": "Jens",      "family": "Eisert"},
+    {"display": "Rafael Chaves",            "given": "Rafael",    "family": "Chaves"},
+    {"display": "Jiaqi Jiang",              "given": "Jiaqi",     "family": "Jiang"},
+    {"display": "Jiannis Pachos",           "given": "Jiannis",   "family": "Pachos"},
+    {"display": "Quntao Zhuang",            "given": "Quntao",    "family": "Zhuang"},
 ]
 
 
@@ -183,12 +223,61 @@ def score_paper(paper: dict) -> list[str]:
     return matched_themes
 
 
+def _author_name_matches(paper_author: str, given: str, family: str) -> bool:
+    pa = paper_author.lower()
+    if family.lower() not in pa:
+        return False
+    given_l = given.lower()
+    # Initials like "A.I." — match on first letter only
+    if re.match(r"^[a-z]\.", given_l):
+        return len(pa) > 0 and pa[0] == given_l[0]
+    return given_l in pa
+
+
+def match_watched_authors(paper: dict) -> list[str]:
+    matched = []
+    for wa in WATCHED_AUTHORS:
+        if any(_author_name_matches(a, wa["given"], wa["family"]) for a in paper["authors"]):
+            matched.append(wa["display"])
+    return matched
+
+
 def filter_papers(papers: list[dict], cutoff: datetime.datetime) -> list[dict]:
     return [p for p in papers if p["submitted"] >= cutoff]
 
 
+def _paper_entry_block(paper: dict, highlight_authors: list[str] | None = None) -> dict:
+    authors_str = ", ".join(paper["authors"][:3])
+    if len(paper["authors"]) > 3:
+        authors_str += " et al."
+
+    snippet = paper["abstract"][:200].rstrip()
+    if len(paper["abstract"]) > 200:
+        snippet += "..."
+
+    watch_line = ""
+    if highlight_authors:
+        watch_line = f"\n:bust_in_silhouette: {', '.join(highlight_authors)}"
+
+    return {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                f"*<{paper['url']}|{paper['title']}>*\n"
+                f"{authors_str}{watch_line}\n"
+                f"_{snippet}_"
+            ),
+        },
+    }
+
+
 def build_blocks(
-    matched: dict[str, list[dict]], date: datetime.date, total: int, num_themes: int
+    matched: dict[str, list[dict]],
+    author_matched: list[dict],
+    date: datetime.date,
+    total: int,
+    num_themes: int,
 ) -> list[dict]:
     blocks = [
         {
@@ -212,42 +301,37 @@ def build_blocks(
                 },
             }
         )
-
         for paper in papers:
-            authors_str = ", ".join(paper["authors"][:3])
-            if len(paper["authors"]) > 3:
-                authors_str += " et al."
-
-            snippet = paper["abstract"][:200].rstrip()
-            if len(paper["abstract"]) > 200:
-                snippet += "..."
-
-            blocks.append(
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f"*<{paper['url']}|{paper['title']}>*\n"
-                            f"{authors_str}\n"
-                            f"_{snippet}_"
-                        ),
-                    },
-                }
-            )
-
+            blocks.append(_paper_entry_block(paper))
         blocks.append({"type": "divider"})
 
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        "%Y-%m-%d %H:%M UTC"
-    )
+    if author_matched:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Author Watch* ({len(author_matched)} paper{'s' if len(author_matched) != 1 else ''})",
+                },
+            }
+        )
+        for paper in author_matched:
+            blocks.append(_paper_entry_block(paper, highlight_authors=paper.get("matched_authors")))
+        blocks.append({"type": "divider"})
+
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    author_note = f", {len(author_matched)} from author watch" if author_matched else ""
     blocks.append(
         {
             "type": "context",
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"{total} paper{'s' if total != 1 else ''} matched across {num_themes} theme{'s' if num_themes != 1 else ''} | {timestamp}",
+                    "text": (
+                        f"{total} paper{'s' if total != 1 else ''} matched across "
+                        f"{num_themes} theme{'s' if num_themes != 1 else ''}"
+                        f"{author_note} | {timestamp}"
+                    ),
                 }
             ],
         }
@@ -312,14 +396,29 @@ def main() -> None:
     logger.info("Papers in time window: %d", len(recent))
 
     theme_buckets: dict[str, list[dict]] = {}
+    theme_seen_ids: set[str] = set()
     for paper in recent:
         themes = score_paper(paper)
         for theme in themes:
             theme_buckets.setdefault(theme, [])
             if len(theme_buckets[theme]) < config.MAX_PAPERS_PER_THEME:
                 theme_buckets[theme].append(paper)
+                theme_seen_ids.add(paper["id"])
 
-    if not theme_buckets:
+    author_watch: list[dict] = []
+    author_watch_ids: set[str] = set()
+    for paper in recent:
+        if paper["id"] in author_watch_ids:
+            continue
+        matched_authors = match_watched_authors(paper)
+        if matched_authors:
+            paper = dict(paper, matched_authors=matched_authors)
+            author_watch.append(paper)
+            author_watch_ids.add(paper["id"])
+            if len(author_watch) >= config.MAX_PAPERS_AUTHOR_WATCH:
+                break
+
+    if not theme_buckets and not author_watch:
         logger.info("No matching papers found.")
         success = send_no_papers_message(now.date())
         sys.exit(0 if success else 1)
@@ -327,10 +426,16 @@ def main() -> None:
     total_papers = sum(len(v) for v in theme_buckets.values())
     num_themes = len(theme_buckets)
 
-    blocks = build_blocks(theme_buckets, now.date(), total_papers, num_themes)
-    fallback = f"arXiv quant-ph Digest — {now.date()}: {total_papers} papers matched."
+    blocks = build_blocks(theme_buckets, author_watch, now.date(), total_papers, num_themes)
+    fallback = (
+        f"arXiv quant-ph Digest — {now.date()}: {total_papers} theme papers"
+        + (f", {len(author_watch)} author watch papers." if author_watch else ".")
+    )
 
-    logger.info("Sending Slack digest: %d papers across %d themes", total_papers, num_themes)
+    logger.info(
+        "Sending Slack digest: %d theme papers across %d themes, %d author watch papers",
+        total_papers, num_themes, len(author_watch),
+    )
     success = send_slack_message(blocks, fallback)
     sys.exit(0 if success else 1)
 
