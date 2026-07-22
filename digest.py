@@ -17,7 +17,7 @@ ARXIV_API_URL = "https://export.arxiv.org/api/query"
 
 THEMES = [
     {
-        "name": "Squeezed light experiment",
+        "name": "Squeezed light",
         "include": [
             "squeezed light",
             "squeezing",
@@ -25,24 +25,21 @@ THEMES = [
             "heterodyne",
             "optical parametric",
             "nonclassical light",
-            "photon statistics",
-            "quadrature noise",
+            "quadrature",
             "photon number resolving",
-            "feedforward",
         ],
         "exclude": [],
     },
     {
-        "name": "Quantum computing experiment",
+        "name": "Quantum computing",
         "include": [
             "quantum processor",
-            "qubit",
             "gate fidelity",
             "superconducting",
             "trapped ion",
-            "quantum error correction",
+            "neutral atom",
+            "error correction",
             "fault tolerant",
-            "surface code",
             "logical qubit",
         ],
         "exclude": [],
@@ -52,11 +49,10 @@ THEMES = [
         "include": [
             "quantum learning",
             "learning quantum",
-            "quantum state tomography",
-            "quantum process tomography",
+            "learning physical",
+            "sample complexity",
             "shadow tomography",
             "classical shadows",
-            "learning quantum channels",
         ],
         "exclude": [
             "quantum machine learning",
@@ -65,15 +61,13 @@ THEMES = [
         ],
     },
     {
-        "name": "Quantum contextuality",
+        "name": "Contextuality",
         "include": [
             "contextuality",
             "kochen-specker",
             "contextual",
             "non-contextual",
             "noncontextual",
-            "bell inequality",
-            "chsh",
         ],
         "exclude": [],
     },
@@ -84,8 +78,6 @@ THEMES = [
             "quantum supremacy",
             "quantum speedup",
             "near-term quantum",
-            "nisq",
-            "quantum protocol proposal",
         ],
         "exclude": [],
     },
@@ -107,20 +99,20 @@ THEMES = [
         ],
     },
     {
-        "name": "(Semi-)device-independent quantum cryptography",
+        "name": "Device-independent",
         "include": [
             "device-independent",
             "device independent",
             "semi-device-independent",
             "semi-device independent",
             "di-qkd",
-            "sdi-qkd",
         ],
         "exclude": [],
     },
     {
         "name": "Synthetic dimensions",
         "include": [
+            "feedforward",
             "synthetic dimension",
             "synthetic lattice",
             "synthetic gauge field",
