@@ -1,4 +1,6 @@
 .env
 state.json
 __pycache__/
+uv.lock
+.python-version
 *.pyc
