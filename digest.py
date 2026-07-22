@@ -17,7 +17,7 @@ ARXIV_API_URL = "https://export.arxiv.org/api/query"
 
 THEMES = [
     {
-        "name": "Squeezed light experiment",
+        "name": "Squeezed light",
         "include": [
             "squeezed light",
             "squeezing",
@@ -25,24 +25,21 @@ THEMES = [
             "heterodyne",
             "optical parametric",
             "nonclassical light",
-            "photon statistics",
-            "quadrature noise",
+            "quadrature",
             "photon number resolving",
-            "feedforward",
         ],
         "exclude": [],
     },
     {
-        "name": "Quantum computing experiment",
+        "name": "Quantum computing",
         "include": [
             "quantum processor",
-            "qubit",
             "gate fidelity",
             "superconducting",
             "trapped ion",
-            "quantum error correction",
+            "neutral atom",
+            "error correction",
             "fault tolerant",
-            "surface code",
             "logical qubit",
         ],
         "exclude": [],
@@ -52,11 +49,10 @@ THEMES = [
         "include": [
             "quantum learning",
             "learning quantum",
-            "quantum state tomography",
-            "quantum process tomography",
+            "learning physical",
+            "sample complexity",
             "shadow tomography",
             "classical shadows",
-            "learning quantum channels",
         ],
         "exclude": [
             "quantum machine learning",
@@ -65,15 +61,13 @@ THEMES = [
         ],
     },
     {
-        "name": "Quantum contextuality",
+        "name": "Contextuality",
         "include": [
             "contextuality",
             "kochen-specker",
             "contextual",
             "non-contextual",
             "noncontextual",
-            "bell inequality",
-            "chsh",
         ],
         "exclude": [],
     },
@@ -84,8 +78,6 @@ THEMES = [
             "quantum supremacy",
             "quantum speedup",
             "near-term quantum",
-            "nisq",
-            "quantum protocol proposal",
         ],
         "exclude": [],
     },
@@ -107,20 +99,20 @@ THEMES = [
         ],
     },
     {
-        "name": "(Semi-)device-independent quantum cryptography",
+        "name": "Device-independent",
         "include": [
             "device-independent",
             "device independent",
             "semi-device-independent",
             "semi-device independent",
             "di-qkd",
-            "sdi-qkd",
         ],
         "exclude": [],
     },
     {
         "name": "Synthetic dimensions",
         "include": [
+            "feedforward",
             "synthetic dimension",
             "synthetic lattice",
             "synthetic gauge field",
@@ -173,13 +165,39 @@ WATCHED_AUTHORS = [
 ]
 
 
-def get_date_window() -> tuple[datetime.datetime, datetime.datetime]:
+STATE_FILE = "state.json"
+STATE_MAX_AGE_DAYS = 8
+
+
+def load_state() -> tuple[datetime.datetime | None, set[str]]:
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        last_run = datetime.datetime.fromisoformat(data["last_run"])
+        sent_ids = set(data.get("sent_ids", []))
+        return last_run, sent_ids
+    except (FileNotFoundError, KeyError, ValueError):
+        return None, set()
+
+
+def save_state(last_run: datetime.datetime, sent_ids: set[str]) -> None:
+    cutoff = last_run - datetime.timedelta(days=STATE_MAX_AGE_DAYS)
+    # Prune IDs we no longer need (we don't store submission dates per ID, so
+    # we keep the full set and rely on MAX_AGE being longer than the lookback)
+    data = {"last_run": last_run.isoformat(), "sent_ids": list(sent_ids)}
+    with open(STATE_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def get_cutoff(last_run: datetime.datetime | None) -> tuple[datetime.datetime, datetime.datetime]:
     now = datetime.datetime.now(datetime.timezone.utc)
-    if now.weekday() == 0:
-        days_back = 3
+    if last_run is not None:
+        # Use last successful run as cutoff, with a 7-day hard cap
+        cutoff = max(last_run, now - datetime.timedelta(days=7))
+    elif now.weekday() == 0:
+        cutoff = now - datetime.timedelta(days=3)
     else:
-        days_back = 1
-    cutoff = now - datetime.timedelta(days=days_back)
+        cutoff = now - datetime.timedelta(days=1)
     return cutoff, now
 
 
@@ -428,7 +446,8 @@ def send_no_papers_message(date: datetime.date) -> bool:
 
 
 def main() -> None:
-    cutoff, now = get_date_window()
+    last_run, sent_ids = load_state()
+    cutoff, now = get_cutoff(last_run)
     logger.info("Fetching quant-ph papers submitted since %s", cutoff.isoformat())
 
     papers = fetch_papers()
@@ -436,18 +455,16 @@ def main() -> None:
         logger.error("No papers retrieved from arXiv.")
         sys.exit(1)
 
-    recent = filter_papers(papers, cutoff)
-    logger.info("Papers in time window: %d", len(recent))
+    recent = [p for p in filter_papers(papers, cutoff) if p["id"] not in sent_ids]
+    logger.info("New papers in window (after dedup): %d", len(recent))
 
     theme_buckets: dict[str, list[dict]] = {}
-    theme_seen_ids: set[str] = set()
     for paper in recent:
         themes = score_paper(paper)
         for theme in themes:
             theme_buckets.setdefault(theme, [])
             if len(theme_buckets[theme]) < config.MAX_PAPERS_PER_THEME:
                 theme_buckets[theme].append(paper)
-                theme_seen_ids.add(paper["id"])
 
     author_watch: list[dict] = []
     author_watch_ids: set[str] = set()
@@ -464,6 +481,7 @@ def main() -> None:
 
     if not theme_buckets and not author_watch:
         logger.info("No matching papers found.")
+        save_state(now, sent_ids)
         success = send_no_papers_message(now.date())
         sys.exit(0 if success else 1)
 
@@ -481,6 +499,9 @@ def main() -> None:
         total_papers, num_themes, len(author_watch),
     )
     success = send_slack_message(blocks, fallback)
+    if success:
+        new_ids = {p["id"] for p in recent}
+        save_state(now, sent_ids | new_ids)
     sys.exit(0 if success else 1)
 
 
