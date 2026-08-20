@@ -36,14 +36,15 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.guard.outputs.run == 'true'
 
-      - uses: actions/setup-python@v5
+      - name: Install uv
         if: steps.guard.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v3
         with:
-          python-version: '3.11'
+          enable-cache: true
 
       - name: Install dependencies
         if: steps.guard.outputs.run == 'true'
-        run: pip install -r requirements.txt
+        run: uv sync --locked
 
       # state.json carries last_run and recently-sent ids so a paper is never
       # posted twice. A fresh restore-key prefix picks up the newest cache.
@@ -62,9 +63,9 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
-            python digest.py --dry-run
+            uv run digest.py --dry-run
           else
-            python digest.py
+            uv run digest.py
           fi
 
       - name: Save digest state
