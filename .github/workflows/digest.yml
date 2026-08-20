@@ -1,0 +1,75 @@
+name: arXiv quant-ph digest
+
+on:
+  schedule:
+    # GitHub cron is UTC only and does not follow DST, so both times are
+    # registered and the guard step below lets exactly one through.
+    - cron: '0 2 * * 1-5'   # 04:00 Europe/Berlin while CEST (summer)
+    - cron: '0 3 * * 1-5'   # 04:00 Europe/Berlin while CET  (winter)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Print the payload instead of posting to Slack'
+        type: boolean
+        default: true
+
+concurrency:
+  group: arxiv-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire only at 04:00 Europe/Berlin
+        id: guard
+        run: |
+          HOUR=$(TZ=Europe/Berlin date +%H)
+          echo "Berlin local time: $(TZ=Europe/Berlin date --iso-8601=minutes)"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$HOUR" != "04" ]; then
+            echo "Local hour is $HOUR, not 04 - this is the other DST cron. Skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.run == 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.guard.outputs.run == 'true'
+        run: pip install -r requirements.txt
+
+      # state.json carries last_run and recently-sent ids so a paper is never
+      # posted twice. A fresh restore-key prefix picks up the newest cache.
+      - name: Restore digest state
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: arxiv-digest-state-${{ github.run_id }}
+          restore-keys: |
+            arxiv-digest-state-
+
+      - name: Run digest
+        if: steps.guard.outputs.run == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            python digest.py --dry-run
+          else
+            python digest.py
+          fi
+
+      - name: Save digest state
+        if: steps.guard.outputs.run == 'true' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: arxiv-digest-state-${{ github.run_id }}
