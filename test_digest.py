@@ -105,6 +105,18 @@ kept = json.load(open("/tmp/state_test.json"))["sent_ids"]
 check("stale id pruned", "old.1" in kept, False)
 check("fresh id kept", "new.1" in kept, True)
 
+print("\n=== missed run detection ===")
+def at(y, m, d, h=2, mi=17):
+    return datetime.datetime(y, m, d, h, mi, tzinfo=datetime.timezone.utc)
+MW = digest.missed_weekdays
+# 2026-08-24 is a Monday, 2026-08-28 a Friday.
+check("consecutive weekdays",     MW(at(2026, 8, 25), at(2026, 8, 26)), 0)
+check("Fri -> Mon is not a gap",  MW(at(2026, 8, 21), at(2026, 8, 24)), 0)
+check("Fri -> Tue misses Monday", MW(at(2026, 8, 21), at(2026, 8, 25)), 1)
+# The outage that stopped this digest: last delivery Wed 26th, next run Fri 28th.
+check("Wed -> Fri misses Thu",    MW(at(2026, 8, 26), at(2026, 8, 28)), 1)
+check("Mon -> Mon misses Tue-Fri", MW(at(2026, 8, 17), at(2026, 8, 24)), 4)
+
 print("\n=== slack block chunking ===")
 big = [{"type": "header", "text": {"type": "plain_text", "text": "h"}}, {"type": "divider"}]
 big += [digest._section(f"row {i}") for i in range(120)]

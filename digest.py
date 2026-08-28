@@ -194,6 +194,21 @@ def save_state(last_run, sent):
         json.dump({"last_run": last_run.isoformat(), "sent_ids": pruned}, f, indent=1)
 
 
+def missed_weekdays(last_run, now):
+    """Count Mon-Fri days between two runs that should have produced a digest.
+
+    A normal weekday gap is 1 day and a Friday->Monday gap is 3, so both come
+    out as 0 here; anything above that means a scheduled run never happened.
+    """
+    day = last_run.date() + datetime.timedelta(days=1)
+    missed = 0
+    while day < now.date():
+        if day.weekday() < 5:
+            missed += 1
+        day += datetime.timedelta(days=1)
+    return missed
+
+
 def get_cutoff(last_run):
     now = datetime.datetime.now(datetime.timezone.utc)
     if last_run is not None:
@@ -606,6 +621,15 @@ def main():
     last_run, sent = load_state()
     cutoff, now = get_cutoff(last_run)
     logger.info("Window: entries updated since %s", cutoff.isoformat())
+
+    if last_run is not None:
+        missed = missed_weekdays(last_run, now)
+        if missed:
+            logger.warning(
+                "No digest ran on %d scheduled weekday(s) since %s - the "
+                "schedule was skipped or never fired. This run covers the gap.",
+                missed, last_run.isoformat(),
+            )
 
     if args.from_file:
         with open(args.from_file) as f:
