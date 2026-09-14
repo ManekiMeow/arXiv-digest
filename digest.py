@@ -240,7 +240,11 @@ def fetch_papers():
     headers = {"User-Agent": config.USER_AGENT}
 
     last_exc = None
+    last_status = None
+    last_retry_after = None
     for attempt in range(1, config.ARXIV_RETRIES + 1):
+        last_status = None
+        last_retry_after = None
         try:
             response = requests.get(
                 ARXIV_API_URL, params=params, headers=headers, timeout=config.ARXIV_TIMEOUT
@@ -251,11 +255,35 @@ def fetch_papers():
                 return papers
             # The arXiv API intermittently returns an empty but valid feed.
             logger.warning("arXiv returned an empty feed (attempt %d)", attempt)
+        except requests.HTTPError as exc:
+            last_exc = exc
+            last_status = exc.response.status_code if exc.response is not None else None
+            if last_status == 429 and exc.response is not None:
+                ra_hdr = exc.response.headers.get("Retry-After", "")
+                try:
+                    last_retry_after = int(ra_hdr)
+                except (ValueError, TypeError):
+                    last_retry_after = None
+            logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
         except requests.RequestException as exc:
             last_exc = exc
             logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
         if attempt < config.ARXIV_RETRIES:
-            time.sleep(5 * attempt)
+            if last_status == 429:
+                # Exponential backoff for rate-limiting: 60s, 120s, 240s, 300s …
+                # honour Retry-After when the server provides it.
+                delay = (
+                    last_retry_after
+                    if last_retry_after
+                    else min(60 * (2 ** (attempt - 1)), 300)
+                )
+                logger.info(
+                    "Rate limited (429); waiting %ds before attempt %d",
+                    delay, attempt + 1,
+                )
+            else:
+                delay = 5 * attempt
+            time.sleep(delay)
 
     if last_exc:
         logger.error("Giving up on arXiv fetch: %s", last_exc)

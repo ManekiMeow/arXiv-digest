@@ -27,5 +27,8 @@ INCLUDE_REPLACEMENTS = os.environ.get("INCLUDE_REPLACEMENTS", "1") not in ("0", 
 
 # Network politeness / resilience.
 ARXIV_TIMEOUT = 60
-ARXIV_RETRIES = 4
+# 5 attempts: for 429 the delays are 60 / 120 / 240 / 300 s (exponential, capped
+# at 5 min), giving ~12 min total wait before giving up.  For other transient
+# errors the original linear 5*n-second delays are kept.
+ARXIV_RETRIES = 5
 USER_AGENT = "arxiv-quant-ph-digest/1.0 (personal research digest; contact via GitHub)"
