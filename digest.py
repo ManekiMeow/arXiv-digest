@@ -451,7 +451,7 @@ def _plural(n, word):
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def build_blocks(theme_buckets, author_matched, replacements, date, total, num_themes, dropped):
+def build_blocks(theme_buckets, author_matched, replacements, date, total, num_themes):
     blocks = [
         {
             "type": "header",
@@ -488,9 +488,6 @@ def build_blocks(theme_buckets, author_matched, replacements, date, total, num_t
         notes.append(f"{len(author_matched)} from author watch")
     if replacements:
         notes.append(f"{len(replacements)} replacements")
-    if dropped:
-        notes.append(f":warning: {dropped} further matches hidden by per-section caps")
-
     blocks.append(
         {
             "type": "context",
@@ -567,7 +564,6 @@ def send_no_papers_message(date):
 
 def build_digest(recent):
     """Bucket papers into themes, author watch and replacements."""
-    dropped = 0
     theme_buckets = {}
     author_watch = []
     replacements = []
@@ -580,19 +576,12 @@ def build_digest(recent):
         if paper["is_replacement"]:
             continue
         for theme in score_paper(paper):
-            bucket = theme_buckets.setdefault(theme, [])
-            if len(bucket) < config.MAX_PAPERS_PER_THEME:
-                bucket.append(paper)
-            else:
-                dropped += 1
+            theme_buckets.setdefault(theme, []).append(paper)
 
     for paper in recent:
         if paper["is_replacement"] or not paper["matched_authors"]:
             continue
         if paper["base_id"] in seen_author_ids:
-            continue
-        if len(author_watch) >= config.MAX_PAPERS_AUTHOR_WATCH:
-            dropped += 1
             continue
         author_watch.append(paper)
         seen_author_ids.add(paper["base_id"])
@@ -603,12 +592,9 @@ def build_digest(recent):
                 continue
             if not (paper["matched_authors"] or score_paper(paper)):
                 continue
-            if len(replacements) >= config.MAX_PAPERS_PER_THEME_REPLACEMENTS:
-                dropped += 1
-                continue
             replacements.append(paper)
 
-    return theme_buckets, author_watch, replacements, dropped
+    return theme_buckets, author_watch, replacements
 
 
 def main():
@@ -655,7 +641,7 @@ def main():
     recent = [p for p in filter_papers(papers, cutoff) if p["id"] not in sent]
     logger.info("Entries in window after dedup: %d of %d fetched", len(recent), len(papers))
 
-    theme_buckets, author_watch, replacements, dropped = build_digest(recent)
+    theme_buckets, author_watch, replacements = build_digest(recent)
 
     if not theme_buckets and not author_watch and not replacements:
         logger.info("No matching papers found.")
@@ -667,12 +653,12 @@ def main():
 
     total = sum(len(v) for v in theme_buckets.values())
     blocks = build_blocks(theme_buckets, author_watch, replacements,
-                          now.date(), total, len(theme_buckets), dropped)
+                          now.date(), total, len(theme_buckets))
     fallback = (f"arXiv quant-ph Digest - {now.date()}: {total} theme papers, "
                 f"{len(author_watch)} author watch, {len(replacements)} replacements")
 
-    logger.info("Digest: %d theme papers / %d themes, %d author watch, %d replacements, %d dropped",
-                total, len(theme_buckets), len(author_watch), len(replacements), dropped)
+    logger.info("Digest: %d theme papers / %d themes, %d author watch, %d replacements",
+                total, len(theme_buckets), len(author_watch), len(replacements))
 
     if args.dry_run:
         for i, chunk in enumerate(chunk_blocks(blocks), 1):

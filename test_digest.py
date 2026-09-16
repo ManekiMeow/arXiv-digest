@@ -86,7 +86,7 @@ check("url strips version", papers[0]["url"], "https://arxiv.org/abs/2608.17094"
 check("author watch on replacement", digest.match_watched_authors(papers[1]), ["Adan Cabello"])
 
 print("\n=== bucketing ===")
-tb, aw, rp, dropped = digest.build_digest([dict(p, matched_authors=[]) for p in papers])
+tb, aw, rp = digest.build_digest([dict(p, matched_authors=[]) for p in papers])
 check("themes found", sorted(tb), ["Device-independent", "Squeezed light", "Synthetic dimensions"] if False else sorted(tb))
 print("   theme buckets:", {k: [x['base_id'] for x in v] for k, v in tb.items()})
 print("   author watch :", [x['base_id'] for x in aw])

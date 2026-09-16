@@ -15,13 +15,6 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 # The API hard-caps a single request at 2000.
 ARXIV_MAX_RESULTS = int(os.environ.get("ARXIV_MAX_RESULTS", "800"))
 
-# Per-section caps so a noisy day cannot produce an unreadable wall of text.
-MAX_PAPERS_PER_THEME = int(os.environ.get("MAX_PAPERS_PER_THEME", "8"))
-MAX_PAPERS_AUTHOR_WATCH = int(os.environ.get("MAX_PAPERS_AUTHOR_WATCH", "15"))
-MAX_PAPERS_PER_THEME_REPLACEMENTS = int(
-    os.environ.get("MAX_PAPERS_PER_THEME_REPLACEMENTS", "5")
-)
-
 # Include v2+ papers (replacements) in the digest.
 INCLUDE_REPLACEMENTS = os.environ.get("INCLUDE_REPLACEMENTS", "1") not in ("0", "false", "")
 
