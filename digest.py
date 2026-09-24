@@ -237,25 +237,55 @@ def fetch_papers():
         "sortOrder": "descending",
         "max_results": config.ARXIV_MAX_RESULTS,
     }
-    headers = {"User-Agent": config.USER_AGENT}
+    headers = {
+        "User-Agent": config.USER_AGENT,
+        "Accept": "application/atom+xml,text/xml;q=0.9,*/*;q=0.8",
+    }
 
     last_exc = None
-    for attempt in range(1, config.ARXIV_RETRIES + 1):
-        try:
-            response = requests.get(
-                ARXIV_API_URL, params=params, headers=headers, timeout=config.ARXIV_TIMEOUT
-            )
-            response.raise_for_status()
-            papers = parse_feed(response.text)
-            if papers:
-                return papers
-            # The arXiv API intermittently returns an empty but valid feed.
-            logger.warning("arXiv returned an empty feed (attempt %d)", attempt)
-        except requests.RequestException as exc:
-            last_exc = exc
-            logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
-        if attempt < config.ARXIV_RETRIES:
-            time.sleep(5 * attempt)
+    with requests.Session() as session:
+        session.headers.update(headers)
+        for attempt in range(1, config.ARXIV_RETRIES + 1):
+            delay = 5 * attempt
+            try:
+                response = session.get(
+                    ARXIV_API_URL, params=params, timeout=config.ARXIV_TIMEOUT
+                )
+                response.raise_for_status()
+                papers = parse_feed(response.text)
+                if papers:
+                    return papers
+                # The arXiv API intermittently returns an empty but valid feed.
+                logger.warning("arXiv returned an empty feed (attempt %d)", attempt)
+            except requests.HTTPError as exc:
+                # HTTPError is a RequestException subclass, so it must be caught
+                # first. arXiv hides throttling behind 406 Not Acceptable, and
+                # the reason is only ever in the headers/body -- log them.
+                last_exc = exc
+                status = getattr(exc.response, "status_code", None)
+                logger.warning(
+                    "arXiv fetch failed (attempt %d) with HTTP %s: %s", attempt, status, exc
+                )
+                logger.warning("arXiv response headers: %s", dict(getattr(exc.response, "headers", {}) or {}))
+                logger.warning("arXiv response body (first 500 chars): %s", (getattr(exc.response, "text", "") or "")[:500])
+                if status in (406, 429, 503):
+                    delay = min(60 * 2 ** (attempt - 1), config.ARXIV_THROTTLE_BACKOFF_CAP)
+                    retry_after = (getattr(exc.response, "headers", {}) or {}).get("Retry-After")
+                    try:
+                        delay = int(retry_after)
+                    except (TypeError, ValueError):
+                        pass
+                    logger.warning("arXiv is throttling us; backing off %ds", delay)
+                elif status is not None and 400 <= status < 500:
+                    # Not transient -- retrying cannot make a malformed or
+                    # missing request succeed.
+                    logger.error("arXiv rejected the request with HTTP %s; not retrying", status)
+                    break
+            except requests.RequestException as exc:
+                last_exc = exc
+                logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
+            if attempt < config.ARXIV_RETRIES:
+                time.sleep(delay)
 
     if last_exc:
         logger.error("Giving up on arXiv fetch: %s", last_exc)
@@ -451,7 +481,7 @@ def _plural(n, word):
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def build_blocks(theme_buckets, author_matched, replacements, date, total, num_themes, dropped):
+def build_blocks(theme_buckets, author_matched, replacements, date, total, num_themes):
     blocks = [
         {
             "type": "header",
@@ -488,9 +518,6 @@ def build_blocks(theme_buckets, author_matched, replacements, date, total, num_t
         notes.append(f"{len(author_matched)} from author watch")
     if replacements:
         notes.append(f"{len(replacements)} replacements")
-    if dropped:
-        notes.append(f":warning: {dropped} further matches hidden by per-section caps")
-
     blocks.append(
         {
             "type": "context",
@@ -567,7 +594,6 @@ def send_no_papers_message(date):
 
 def build_digest(recent):
     """Bucket papers into themes, author watch and replacements."""
-    dropped = 0
     theme_buckets = {}
     author_watch = []
     replacements = []
@@ -580,19 +606,12 @@ def build_digest(recent):
         if paper["is_replacement"]:
             continue
         for theme in score_paper(paper):
-            bucket = theme_buckets.setdefault(theme, [])
-            if len(bucket) < config.MAX_PAPERS_PER_THEME:
-                bucket.append(paper)
-            else:
-                dropped += 1
+            theme_buckets.setdefault(theme, []).append(paper)
 
     for paper in recent:
         if paper["is_replacement"] or not paper["matched_authors"]:
             continue
         if paper["base_id"] in seen_author_ids:
-            continue
-        if len(author_watch) >= config.MAX_PAPERS_AUTHOR_WATCH:
-            dropped += 1
             continue
         author_watch.append(paper)
         seen_author_ids.add(paper["base_id"])
@@ -603,12 +622,9 @@ def build_digest(recent):
                 continue
             if not (paper["matched_authors"] or score_paper(paper)):
                 continue
-            if len(replacements) >= config.MAX_PAPERS_PER_THEME_REPLACEMENTS:
-                dropped += 1
-                continue
             replacements.append(paper)
 
-    return theme_buckets, author_watch, replacements, dropped
+    return theme_buckets, author_watch, replacements
 
 
 def main():
@@ -655,7 +671,7 @@ def main():
     recent = [p for p in filter_papers(papers, cutoff) if p["id"] not in sent]
     logger.info("Entries in window after dedup: %d of %d fetched", len(recent), len(papers))
 
-    theme_buckets, author_watch, replacements, dropped = build_digest(recent)
+    theme_buckets, author_watch, replacements = build_digest(recent)
 
     if not theme_buckets and not author_watch and not replacements:
         logger.info("No matching papers found.")
@@ -667,12 +683,12 @@ def main():
 
     total = sum(len(v) for v in theme_buckets.values())
     blocks = build_blocks(theme_buckets, author_watch, replacements,
-                          now.date(), total, len(theme_buckets), dropped)
+                          now.date(), total, len(theme_buckets))
     fallback = (f"arXiv quant-ph Digest - {now.date()}: {total} theme papers, "
                 f"{len(author_watch)} author watch, {len(replacements)} replacements")
 
-    logger.info("Digest: %d theme papers / %d themes, %d author watch, %d replacements, %d dropped",
-                total, len(theme_buckets), len(author_watch), len(replacements), dropped)
+    logger.info("Digest: %d theme papers / %d themes, %d author watch, %d replacements",
+                total, len(theme_buckets), len(author_watch), len(replacements))
 
     if args.dry_run:
         for i, chunk in enumerate(chunk_blocks(blocks), 1):

@@ -1,5 +1,6 @@
 """Checks for the matcher fixes and replacement handling."""
 import datetime, json, sys
+import config
 import digest
 
 FAILED = []
@@ -86,7 +87,7 @@ check("url strips version", papers[0]["url"], "https://arxiv.org/abs/2608.17094"
 check("author watch on replacement", digest.match_watched_authors(papers[1]), ["Adan Cabello"])
 
 print("\n=== bucketing ===")
-tb, aw, rp, dropped = digest.build_digest([dict(p, matched_authors=[]) for p in papers])
+tb, aw, rp = digest.build_digest([dict(p, matched_authors=[]) for p in papers])
 check("themes found", sorted(tb), ["Device-independent", "Squeezed light", "Synthetic dimensions"] if False else sorted(tb))
 print("   theme buckets:", {k: [x['base_id'] for x in v] for k, v in tb.items()})
 print("   author watch :", [x['base_id'] for x in aw])
@@ -126,6 +127,84 @@ check("no blocks lost", sum(len(c) for c in chunks) - (len(chunks) - 1), len(big
 
 print("\n=== mrkdwn escaping ===")
 check("angle brackets escaped", "&lt;" in digest._esc("a <b> c"), True)
+
+print("\n=== fetch_papers HTTP error handling ===")
+import logging, requests
+from unittest import mock
+
+def _response(status, body, headers=None):
+    r = requests.Response()
+    r.status_code = status
+    r._content = body.encode()
+    r.url = digest.ARXIV_API_URL
+    r.headers.update(headers or {})
+    return r
+
+class _FakeSession:
+    """Stand-in for requests.Session that replays queued responses."""
+    def __init__(self, *responses):
+        self._responses = responses
+        self.calls = 0
+        self.headers = {}
+    def get(self, url, **kwargs):
+        self.calls += 1
+        return self._responses[min(self.calls, len(self._responses)) - 1]
+    def __enter__(self):
+        return self
+    def __exit__(self, *exc):
+        return False
+
+class _LogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+def _run_fetch(*responses):
+    """Call fetch_papers() against canned responses; no network, no waiting."""
+    session = _FakeSession(*responses)
+    capture = _LogCapture()
+    digest.logger.addHandler(capture)
+    slept = []
+    try:
+        with mock.patch.object(digest.requests, "Session", return_value=session), \
+             mock.patch.object(digest.time, "sleep", slept.append):
+            papers = digest.fetch_papers()
+    finally:
+        digest.logger.removeHandler(capture)
+    return papers, session, slept, "\n".join(capture.messages)
+
+# 406 is how arXiv hides throttling: retry, but slowly, and say what came back.
+throttled = _response(406, "<html>Not Acceptable: bot mitigation triggered</html>",
+                      {"X-Blocked-By": "arxiv-bot-mitigation"})
+papers, session, slept, log = _run_fetch(throttled, _response(200, FEED))
+check("406 then 200 parses",        len(papers), 3)
+check("406 retried once",           session.calls, 2)
+check("406 backs off 60s not 5s",   slept, [60])
+check("406 body logged",            "bot mitigation triggered" in log, True)
+check("406 headers logged",         "arxiv-bot-mitigation" in log, True)
+
+# Retry-After wins over the exponential schedule when it parses as an int.
+papers, session, slept, log = _run_fetch(
+    _response(503, "unavailable", {"Retry-After": "12"}), _response(200, FEED))
+check("Retry-After honoured",        slept, [12])
+
+# 400 is not transient: fail fast instead of burning all ARXIV_RETRIES.
+papers, session, slept, log = _run_fetch(_response(400, "malformed search_query"))
+check("400 gives up",                papers, [])
+check("400 requested exactly once",  session.calls, 1)
+check("400 never sleeps",            slept, [])
+check("400 body logged",             "malformed search_query" in log, True)
+
+# The happy path is unchanged.
+papers, session, slept, log = _run_fetch(_response(200, FEED))
+check("200 parses first try",        len(papers), 3)
+check("200 requested exactly once",  session.calls, 1)
+check("200 never sleeps",            slept, [])
+check("200 sets Accept header",      session.headers.get("Accept"),
+      "application/atom+xml,text/xml;q=0.9,*/*;q=0.8")
+check("200 sets User-Agent header",  session.headers.get("User-Agent"), config.USER_AGENT)
 
 print()
 if FAILED:
