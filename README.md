@@ -1,8 +1,9 @@
 # arXiv quant-ph → Slack digest
 
 Posts a filtered digest of the daily arXiv quant-ph announcements to a Slack
-channel at **04:00 Europe/Berlin, Monday–Friday**, filtered by keyword themes
-and a watched-author list.
+channel at a nominal **02:07 Europe/Berlin, Monday–Friday**, filtered by keyword
+themes and a watched-author list. The nominal time is set deliberately early —
+see the scheduling section below for why it lands mid-morning in practice.
 
 ## Setup (about five minutes)
 
@@ -35,17 +36,24 @@ and a watched-author list.
 
 That's it. The schedule takes over the next weekday morning.
 
-## How the 04:00 schedule survives DST
+## How the 02:07 schedule survives DST
 
 GitHub cron is UTC-only and ignores daylight saving. So two crons are
-registered — `0 2 * * 1-5` and `0 3 * * 1-5` — and the first step in the job
-checks `TZ=Europe/Berlin date +%H` and exits unless the local hour is `04`.
-Exactly one fires per day, year-round, with no edit needed in March or October.
+registered — `07 0 * * 1-5` (00:07 UTC = 02:07 Berlin under CEST) and
+`07 1 * * 1-5` (01:07 UTC = 02:07 Berlin under CET) — and the first step in the
+job keys off *which cron entry fired* (`github.event.schedule`) rather than the
+wall-clock hour on the runner, letting exactly one of the two through per day.
+Those two strings are duplicated into the job's `CRON_SUMMER` / `CRON_WINTER`
+env vars, which the guard compares against verbatim; if you edit the schedule,
+edit the env block in the same commit. Exactly one fires per day, year-round,
+with no edit needed in March or October.
 
-One caveat that is GitHub's, not this script's: scheduled workflows are
-queued on a best-effort basis and can be delayed by 5–30 minutes when the
-Actions fleet is busy. If the digest must land at exactly 04:00, this is the
-wrong scheduler.
+One caveat that is GitHub's, not this script's: scheduled workflows are queued
+on a best-effort basis and this repository has seen them delivered 4.8–5.7
+hours late (mean 5.3h over the last ten runs), so the nominal 02:07 actually
+lands around 07:20 Berlin. The nominal time is set three hours earlier than the
+07:00-ish arrival that is actually wanted, precisely to absorb that delay. If
+the digest must land at an exact minute, this is the wrong scheduler.
 
 ## State and de-duplication
 

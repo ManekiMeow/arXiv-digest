@@ -6,8 +6,11 @@ on:
     # registered and the guard step below lets exactly one through.
     # Deliberately off the top of the hour: GitHub queues scheduled runs
     # hardest at :00, and a run that is delayed far enough gets dropped.
-    - cron: '07 3 * * 1-5'  # 05:07 Europe/Berlin while CEST (summer)
-    - cron: '07 4 * * 1-5'  # 05:07 Europe/Berlin while CET  (winter)
+    # The nominal 02:07 Berlin is also deliberately early: GitHub delivers
+    # this repository's scheduled events 4.8-5.7h late (mean 5.3h over the
+    # last ten runs), so 02:07 nominal actually lands around 07:20 Berlin.
+    - cron: '07 0 * * 1-5'  # 00:07 UTC = 02:07 Europe/Berlin while CEST (summer)
+    - cron: '07 1 * * 1-5'  # 01:07 UTC = 02:07 Europe/Berlin while CET  (winter)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -25,8 +28,8 @@ jobs:
     env:
       # Must stay identical to the two `cron:` entries above - the guard
       # compares against them verbatim.
-      CRON_SUMMER: '07 3 * * 1-5'
-      CRON_WINTER: '07 4 * * 1-5'
+      CRON_SUMMER: '07 0 * * 1-5'
+      CRON_WINTER: '07 1 * * 1-5'
     steps:
       # Picks whichever of the two DST crons is the live one. This keys off
       # *which cron entry fired* rather than the wall-clock hour on the runner:
