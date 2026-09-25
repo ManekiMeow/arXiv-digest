@@ -243,49 +243,52 @@ def fetch_papers():
     }
 
     last_exc = None
-    with requests.Session() as session:
-        session.headers.update(headers)
-        for attempt in range(1, config.ARXIV_RETRIES + 1):
-            delay = 5 * attempt
-            try:
-                response = session.get(
-                    ARXIV_API_URL, params=params, timeout=config.ARXIV_TIMEOUT
+
+    last_status = None
+    last_retry_after = None
+    for attempt in range(1, config.ARXIV_RETRIES + 1):
+        last_status = None
+        last_retry_after = None
+        try:
+            response = requests.get(
+                ARXIV_API_URL, params=params, headers=headers, timeout=config.ARXIV_TIMEOUT
+            )
+            response.raise_for_status()
+            papers = parse_feed(response.text)
+            if papers:
+                return papers
+            # The arXiv API intermittently returns an empty but valid feed.
+            logger.warning("arXiv returned an empty feed (attempt %d)", attempt)
+        except requests.HTTPError as exc:
+            last_exc = exc
+            last_status = exc.response.status_code if exc.response is not None else None
+            if last_status == 429 and exc.response is not None:
+                ra_hdr = exc.response.headers.get("Retry-After", "")
+                try:
+                    last_retry_after = int(ra_hdr)
+                except (ValueError, TypeError):
+                    last_retry_after = None
+            logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
+        except requests.RequestException as exc:
+            last_exc = exc
+            logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
+        if attempt < config.ARXIV_RETRIES:
+            if last_status == 429:
+                # Exponential backoff for rate-limiting: 60s, 120s, 240s, 300s …
+                # honour Retry-After when the server provides it.
+                delay = (
+                    last_retry_after
+                    if last_retry_after
+                    else min(60 * (2 ** (attempt - 1)), 300)
                 )
-                response.raise_for_status()
-                papers = parse_feed(response.text)
-                if papers:
-                    return papers
-                # The arXiv API intermittently returns an empty but valid feed.
-                logger.warning("arXiv returned an empty feed (attempt %d)", attempt)
-            except requests.HTTPError as exc:
-                # HTTPError is a RequestException subclass, so it must be caught
-                # first. arXiv hides throttling behind 406 Not Acceptable, and
-                # the reason is only ever in the headers/body -- log them.
-                last_exc = exc
-                status = getattr(exc.response, "status_code", None)
-                logger.warning(
-                    "arXiv fetch failed (attempt %d) with HTTP %s: %s", attempt, status, exc
+                logger.info(
+                    "Rate limited (429); waiting %ds before attempt %d",
+                    delay, attempt + 1,
                 )
-                logger.warning("arXiv response headers: %s", dict(getattr(exc.response, "headers", {}) or {}))
-                logger.warning("arXiv response body (first 500 chars): %s", (getattr(exc.response, "text", "") or "")[:500])
-                if status in (406, 429, 503):
-                    delay = min(60 * 2 ** (attempt - 1), config.ARXIV_THROTTLE_BACKOFF_CAP)
-                    retry_after = (getattr(exc.response, "headers", {}) or {}).get("Retry-After")
-                    try:
-                        delay = int(retry_after)
-                    except (TypeError, ValueError):
-                        pass
-                    logger.warning("arXiv is throttling us; backing off %ds", delay)
-                elif status is not None and 400 <= status < 500:
-                    # Not transient -- retrying cannot make a malformed or
-                    # missing request succeed.
-                    logger.error("arXiv rejected the request with HTTP %s; not retrying", status)
-                    break
-            except requests.RequestException as exc:
-                last_exc = exc
-                logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
-            if attempt < config.ARXIV_RETRIES:
-                time.sleep(delay)
+            else:
+                delay = 5 * attempt
+            time.sleep(delay)
+
 
     if last_exc:
         logger.error("Giving up on arXiv fetch: %s", last_exc)

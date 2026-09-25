@@ -25,7 +25,9 @@ ARXIV_THROTTLE_BACKOFF_CAP = int(os.environ.get("ARXIV_THROTTLE_BACKOFF_CAP", "3
 
 # Network politeness / resilience.
 ARXIV_TIMEOUT = 60
+
+# 5 attempts: for 429 the delays are 60 / 120 / 240 / 300 s (exponential, capped
+# at 5 min), giving ~12 min total wait before giving up.  For other transient
+# errors the original linear 5*n-second delays are kept.
 ARXIV_RETRIES = 5
-# arXiv's API terms of use ask for a descriptive User-Agent carrying a project
-# URL and a contact address so they can reach the operator instead of blocking.
-USER_AGENT = "arxiv-quant-ph-digest/1.0 (+https://github.com/ManekiMeow/arXiv-digest; mailto:ericaphysx@gmail.com)"
+USER_AGENT = "arxiv-quant-ph-digest/1.0 (personal research digest; contact via GitHub)"
