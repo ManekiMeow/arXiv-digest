@@ -128,6 +128,120 @@ check("'and' inside a name is kept",    PA("Anders Sandberg and Nicole Yunger Ha
       ["Anders Sandberg", "Nicole Yunger Halpern"])
 check("empty authors string",           PA(""), [])
 
+print("\n=== LaTeX decoding (arXivRaw serves TeX, the Atom feed served Unicode) ===")
+D = digest._decode_latex
+# Every string below is verbatim output from a live dry run against arXivRaw.
+check("umlaut + dotless i + cedilla",
+      D(r'\"Ozlem Erk{\i}l{\i}\c{c}, Aritra Das, S. Nibedita Swain'),
+      "Özlem Erkılıç, Aritra Das, S. Nibedita Swain")
+check("umlaut + dotless i + breve",
+      D(r'Asghar Ullah, \"Ozg\"ur E. M\"ustecapl{\i}o\u{g}lu'),
+      "Asghar Ullah, Özgür E. Müstecaplıoğlu")
+check("umlaut mid-word",
+      D(r'Andre Youssefi, Erc\"ument Kaya, Minh Chung'),
+      "Andre Youssefi, Ercüment Kaya, Minh Chung")
+check("acute on a hyphenated family name",
+      D(r"Asghar Ullah, Giovanni Scala, Luis L. S\'anchez-Soto"),
+      "Asghar Ullah, Giovanni Scala, Luis L. Sánchez-Soto")
+check("umlaut, three-name list",
+      D(r'Alejandro R. Ramos Ramos, Maximilian Fr\"ohlich, Aaron Sander'),
+      "Alejandro R. Ramos Ramos, Maximilian Fröhlich, Aaron Sander")
+check("acute at the end of a name",
+      D(r"Matija Medvidovi\'c, Angel Rubio, Juan Carrasquilla"),
+      "Matija Medvidović, Angel Rubio, Juan Carrasquilla")
+check("umlaut before a hyphen",
+      D(r'Guillem M\"uller-Rigat, Albert Aloy, Maciej Lewenstein'),
+      "Guillem Müller-Rigat, Albert Aloy, Maciej Lewenstein")
+check("title: accent decoded, math left alone",
+      D(r"Bridge of $\Psi$'s: Quantum Circuit Optimization with Schr\"odinger Bridges"),
+      "Bridge of $\\Psi$'s: Quantum Circuit Optimization with Schrödinger Bridges")
+
+# Accents arrive braced and unbraced and brace-wrapped, all three interchangeably.
+check("braced, unbraced, wrapped",      D(r'\"o \"{o} {\"o}'), "ö ö ö")
+check("dotless i, all three forms",     D(r'{\i} \i{} \i '), "ı ı ı")
+check("standalone letters",             D(r'\l{} \L{} \o{} \O{} \aa{} \AA{} \ae{} \AE{} \ss{}'),
+      "ł Ł ø Ø å Å æ Æ ß")
+check("a space terminates the macro",   D(r'S\o ren M{\o}ller'), "Søren Møller")
+check("the full accent table",
+      D(r'\c{c} \u{g} \v{s} \.z \=a \H{o} \r{a} \k{a} \~n \`a \^o'),
+      "ç ğ š ż ā ő å ą ñ à ô")
+check("stray braces around plain words", D(r'{Bell} inequalit{y}'), "Bell inequality")
+check("precomposed NFC, not combining", [hex(ord(c)) for c in D(r'M\"uller')],
+      ["0x4d", "0xfc", "0x6c", "0x6c", "0x65", "0x72"])
+
+# Real math must survive: the decoder runs in math_mode="verbatim", so anything
+# between $...$ is passed through byte for byte rather than half-rendered.
+check("inline math untouched",          D(r'We use $\alpha$ and $\mathcal{O}(n \log n)$ here'),
+      "We use $\\alpha$ and $\\mathcal{O}(n \\log n)$ here")
+check("math outside $...$ untouched",   D(r'O(n^2) and T_c with \"o'), "O(n^2) and T_c with ö")
+check("bare % is data, not a comment",  D(r'95% fidelity for Fr\"ohlich'),
+      "95% fidelity for Fröhlich")
+check("bare & is not a table separator", D(r'Alice & Bob, Schr\"odinger'),
+      "Alice & Bob, Schrödinger")
+check("escaped metacharacters",         D(r'100\% \& \#1 with M\"uller'), "100% & #1 with Müller")
+
+# Decoding text that is already Unicode must change nothing, or a second pass
+# anywhere in the pipeline would corrupt it.
+CLEAN = "Özlem Erkılıç, Schrödinger, $\\alpha$, 95% of runs, Alice & Bob"
+check("clean Unicode is a no-op",       D(CLEAN), CLEAN)
+check("decoding is idempotent",
+      all(D(D(s)) == D(s) for s in [
+          r'\"Ozlem Erk{\i}l{\i}\c{c}',
+          r"Luis L. S\'anchez-Soto",
+          r"Bridge of $\Psi$'s with Schr\"odinger Bridges",
+          r'95% and \& and $\mathcal{O}(n^2)$',
+      ]), True)
+
+print("\n=== the matcher only sees decoded names ===")
+# This is the correctness bug, not a formatting one: _fold() strips diacritics,
+# so an unaccented watch-list entry matches "Sánchez-Soto" - but a literal
+# backslash-quote-a is not a diacritic, and the match failed silently.
+check("undecoded escape does NOT match (the bug)",
+      M(r"Luis L. S\'anchez-Soto", "Luis", "Sanchez-Soto"), False)
+check("decoded name matches an unaccented watch entry",
+      M(D(r"Luis L. S\'anchez-Soto"), "Luis", "Sanchez-Soto"), True)
+check("parse_authors feeds the matcher decoded names",
+      [a for a in PA(r"Asghar Ullah, Giovanni Scala, Luis L. S\'anchez-Soto")
+       if M(a, "Luis", "Sanchez-Soto")],
+      ["Luis L. Sánchez-Soto"])
+check("umlaut and breve fold away",
+      M(D(r'\"Ozg\"ur E. M\"ustecaplo\u{g}lu'), "Ozgur", "Mustecaploglu"), True)
+# Dotless i is a letter in its own right, not an accented i: NFKD leaves U+0131
+# alone, so _fold() cannot reduce it to "i". A watch entry for this name has to
+# be spelled with the dotless letter. Pre-existing _fold() behaviour, asserted
+# here so it stays a known limit rather than a surprise.
+check("dotless i does not fold to i",
+      M(D(r'\"Ozg\"ur E. M\"ustecapl{\i}o\u{g}lu'), "Ozgur", "Mustecaplioglu"), False)
+check("dotless i matches a dotless watch entry",
+      M(D(r'\"Ozg\"ur E. M\"ustecapl{\i}o\u{g}lu'), "Ozgur", "Müstecaplıoğlu"), True)
+
+print("\n=== authors are decoded before the split ===")
+check("brace groups do not confuse the splitter",
+      PA(r'\"Ozlem Erk{\i}l{\i}\c{c}, Aritra Das, S. Nibedita Swain'),
+      ["Özlem Erkılıç", "Aritra Das", "S. Nibedita Swain"])
+check("' and ' still splits after decoding",
+      PA(r'Maximilian Fr\"ohlich and Matija Medvidovi\'c'),
+      ["Maximilian Fröhlich", "Matija Medvidović"])
+check("affiliations still stripped after decoding",
+      PA(r'M\"uller (1), S\'anchez-Soto (2) ((1) FUB, (2) UCM)'),
+      ["Müller", "Sánchez-Soto"])
+
+print("\n=== LaTeX-laden records end to end ===")
+LATEX_RECORDS = fixture("oai_listrecords_latex.xml")
+tex_papers, tex_token = digest.parse_oai_response(LATEX_RECORDS)
+tex, plain = tex_papers
+check("title decoded, math preserved",  tex["title"],
+      "Bridge of $\\Psi$'s: Quantum Circuit Optimization with Schrödinger Bridges")
+check("authors decoded",                tex["authors"],
+      ["Asghar Ullah", "Giovanni Scala", "Luis L. Sánchez-Soto"])
+check("abstract keeps its formulae",    tex["abstract"],
+      "We optimise the quadrature squeezing of $|\\psi\\rangle$ with a cost that "
+      "scales as $\\mathcal{O}(n^2)$, reaching 95% fidelity for N < 10 modes.")
+check("decoded abstract still scores",  digest.score_paper(tex), ["Squeezed light"])
+check("already-Unicode record untouched", plain["authors"],
+      ["Matija Medvidović", "Ángel Rubio", "Juan Carrasquilla"])
+check("already-Unicode title untouched", plain["title"], "Contextuality without diacritics")
+
 print("\n=== namespace handling ===")
 # The envelope and the metadata sit in two different namespaces; a lookup that
 # ignored either would still find the tags by local name.

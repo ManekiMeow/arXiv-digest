@@ -67,6 +67,17 @@ Mondays). Worst case you see one repeated digest, never a silent gap.
   `arXivRaw` metadata format is the one that carries per-version dates at second
   resolution, so the window filter stays exact; `from` is only a coarse
   pre-filter and is deliberately widened by a day.
+- **LaTeX escapes are decoded.** `arXivRaw` hands back the submitted TeX source
+  where the Atom API handed back rendered Unicode, so names reached Slack as
+  `Schr\"odinger` and `S\'anchez-Soto`. Titles, abstracts and authors are run
+  through `pylatexenc` on the way in. This is not cosmetic: the author matcher
+  below folds diacritics before comparing, and a backslash escape is not a
+  diacritic, so accented watch-list names had stopped matching *silently*.
+  Mathematics is decoded in `math_mode="verbatim"` — everything between `$...$`
+  is passed through exactly as submitted, because a half-rendered formula reads
+  worse than the TeX it came from. Bare `&`, `%` and `#`, which submitters leave
+  unescaped in prose, are protected first; unguarded, TeX reads `&` as a table
+  separator and `%` as a comment that swallows the rest of the line.
 - **Replacements now appear.** A paper counts as a replacement when its highest
   `<version>` is above v1, and the window is applied to the newest version's
   date rather than v1's. As written before, a v2 could never surface: it has an
@@ -83,8 +94,8 @@ Mondays). Worst case you see one repeated digest, never a silent gap.
   | `Yuhao Meng` | Yu Meng | matched (wrong) | no match |
   | `Adán Cabello` | Adan Cabello | no match (wrong) | matched |
 
-  The accent case matters — arXiv renders the name as `Adán Cabello`, so that
-  watch entry never fired. Initials still work in both directions: `C.-F. Li`
+  The accent case matters — the name reaches the matcher as `Adán Cabello`
+  (`Ad\'an Cabello` before decoding), so that watch entry never fired. Initials still work in both directions: `C.-F. Li`
   matches `Chuan-Feng Li`, and `Zi-Feng Li` correctly does not.
 - **Slack's 50-block limit is respected.** A busy day could previously build a
   payload Slack rejects outright; `chunk_blocks` now splits it across messages.

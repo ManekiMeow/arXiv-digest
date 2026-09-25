@@ -18,6 +18,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 
 import requests
+from pylatexenc.latex2text import LatexNodes2Text
 
 import config
 
@@ -383,6 +384,44 @@ def _text(element):
     return element.text.strip() if element is not None and element.text else ""
 
 
+# arXivRaw hands back the author's TeX source, where the Atom feed used to hand
+# back Unicode: "Schr\"odinger", "S\'anchez-Soto". Rendering those escapes is not
+# cosmetic - _author_name_matches() folds diacritics before comparing, and a
+# literal backslash-quote-a is not a diacritic, so an accented watch-list name
+# stops matching silently.
+#
+# math_mode="verbatim" leaves everything between $...$ exactly as submitted:
+# arXiv abstracts are full of real formulae, and a half-rendered equation is
+# worse than the TeX it came from. Only text-mode markup is resolved.
+_LATEX = LatexNodes2Text(
+    math_mode="verbatim",
+    keep_comments=True,
+    strict_latex_spaces=True,
+)
+
+# &, % and # are TeX metacharacters that arXiv submitters routinely leave bare in
+# prose ("a 95% fidelity", "Alice & Bob"). Unescaped they are destructive: & is
+# read as a table cell separator and dropped, and % comments out the rest of the
+# line - taking any escapes after it along with it. Escaping them first makes
+# them survive as themselves.
+_BARE_TEX_METACHAR = re.compile(r"(?<!\\)([&%#])")
+
+
+def _decode_latex(text):
+    """Render arXivRaw's TeX source as the Unicode the Atom feed used to serve."""
+    if "\\" not in text and "{" not in text and "}" not in text:
+        # Nothing to render: most records are plain text already, and skipping
+        # the parser keeps them byte-identical instead of merely equivalent.
+        return unicodedata.normalize("NFC", text)
+    try:
+        rendered = _LATEX.latex_to_text(_BARE_TEX_METACHAR.sub(r"\\\1", text))
+    except Exception:
+        # Never lose a paper over unparseable markup; the raw text still reads.
+        logger.warning("Could not decode LaTeX in %r; using it verbatim", text[:120])
+        return unicodedata.normalize("NFC", text)
+    return unicodedata.normalize("NFC", rendered)
+
+
 def _norm(text):
     """Collapse the newlines and padding arXiv wraps its text fields in."""
     return " ".join(text.split())
@@ -432,9 +471,14 @@ def parse_authors(text):
     be recovered here. Affiliation markers and the trailing affiliation legend
     are dropped, because _author_name_matches() keys off the *last* tokens being
     the family name.
+
+    The TeX is rendered *before* splitting, not per name: _split_top_level()
+    tracks parentheses only, so a brace group like "Erk{\\i}l{\\i}\\c{c}" is
+    invisible to it and cannot hide or invent a delimiter either way, while
+    decoding once costs one parser call per record instead of one per author.
     """
     names = []
-    for part in _split_top_level(_norm(text)):
+    for part in _split_top_level(_norm(_decode_latex(text))):
         name = _norm(_strip_parens(part)).strip(" ,;")
         # A pure affiliation legend, e.g. "((1) MIT, (2) Caltech)", strips empty.
         if name and name.lower() not in ("et al.", "et al"):
@@ -495,8 +539,8 @@ def _parse_record(record):
         "id": f"{base_id}v{version}",
         "base_id": base_id,
         "version": version,
-        "title": _norm(title),
-        "abstract": _norm(_text(meta.find("raw:abstract", NS))),
+        "title": _norm(_decode_latex(title)),
+        "abstract": _norm(_decode_latex(_text(meta.find("raw:abstract", NS)))),
         "authors": parse_authors(_text(meta.find("raw:authors", NS))),
         "categories": categories,
         "submitted": submitted,
