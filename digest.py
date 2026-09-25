@@ -10,6 +10,7 @@ import re
 import sys
 import json
 import time
+import email.utils
 import logging
 import argparse
 import datetime
@@ -23,7 +24,18 @@ import config
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-ARXIV_API_URL = "https://export.arxiv.org/api/query"
+# The OAI-PMH envelope and arXiv's raw metadata format live in two different
+# namespaces, and ElementTree needs both spelled out.
+NS = {
+    "oai": "http://www.openarchives.org/OAI/2.0/",
+    "raw": "http://arxiv.org/OAI/arXivRaw/",
+}
+
+# arXiv's terms of use ask for no more than one request every three seconds.
+OAI_PAGE_DELAY = 3
+
+# Never let a server-supplied Retry-After stall the job for longer than this.
+RETRY_AFTER_CAP = 300
 
 # Slack rejects a message with more than 50 blocks.
 SLACK_MAX_BLOCKS = 50
@@ -224,141 +236,276 @@ def get_cutoff(last_run):
 # Fetching
 # --------------------------------------------------------------------------
 
-def fetch_papers():
-    """Fetch recent quant-ph entries, newest update first.
+def fetch_papers(from_date=None):
+    """Harvest quant-ph records from arXiv's OAI-PMH endpoint.
 
-    Sorting by lastUpdatedDate (rather than submittedDate) is what makes
-    replacements visible: a v2 posted today has an old `published` but a
-    fresh `updated`.
+    OAI-PMH applies the window server-side via `from`, and pages with a
+    resumptionToken. The spec allows the token to travel with *no* other
+    parameter, so every page after the first is a fresh two-key query.
+
+    `from` has day granularity (arXiv's Identify reports YYYY-MM-DD), so it can
+    only ever be a coarse pre-filter; filter_papers() remains the real gate.
     """
     params = {
-        "search_query": "cat:quant-ph",
-        "sortBy": "lastUpdatedDate",
-        "sortOrder": "descending",
-        "max_results": config.ARXIV_MAX_RESULTS,
+        "verb": "ListRecords",
+        "metadataPrefix": "arXivRaw",
+        "set": config.ARXIV_OAI_SET,
     }
-    headers = {
-        "User-Agent": config.USER_AGENT,
-        "Accept": "application/atom+xml,text/xml;q=0.9,*/*;q=0.8",
-    }
-
-    last_exc = None
-
-    last_status = None
-    last_retry_after = None
-    for attempt in range(1, config.ARXIV_RETRIES + 1):
-        last_status = None
-        last_retry_after = None
-        try:
-            response = requests.get(
-                ARXIV_API_URL, params=params, headers=headers, timeout=config.ARXIV_TIMEOUT
-            )
-            response.raise_for_status()
-            papers = parse_feed(response.text)
-            if papers:
-                return papers
-            # The arXiv API intermittently returns an empty but valid feed.
-            logger.warning("arXiv returned an empty feed (attempt %d)", attempt)
-        except requests.HTTPError as exc:
-            last_exc = exc
-            last_status = exc.response.status_code if exc.response is not None else None
-            if last_status == 429 and exc.response is not None:
-                ra_hdr = exc.response.headers.get("Retry-After", "")
-                try:
-                    last_retry_after = int(ra_hdr)
-                except (ValueError, TypeError):
-                    last_retry_after = None
-            logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
-        except requests.RequestException as exc:
-            last_exc = exc
-            logger.warning("arXiv fetch failed (attempt %d): %s", attempt, exc)
-        if attempt < config.ARXIV_RETRIES:
-            if last_status == 429:
-                # Exponential backoff for rate-limiting: 60s, 120s, 240s, 300s …
-                # honour Retry-After when the server provides it.
-                delay = (
-                    last_retry_after
-                    if last_retry_after
-                    else min(60 * (2 ** (attempt - 1)), 300)
-                )
-                logger.info(
-                    "Rate limited (429); waiting %ds before attempt %d",
-                    delay, attempt + 1,
-                )
-            else:
-                delay = 5 * attempt
-            time.sleep(delay)
-
-
-    if last_exc:
-        logger.error("Giving up on arXiv fetch: %s", last_exc)
-    return []
-
-
-def parse_feed(xml_text):
-    ns = {
-        "atom": "http://www.w3.org/2005/Atom",
-        "arxiv": "http://arxiv.org/schemas/atom",
-    }
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        logger.error("Failed to parse arXiv XML: %s", exc)
-        return []
+    if from_date is not None:
+        params["from"] = from_date.isoformat()
+    # No `until`: arXiv advises against it for incremental harvesting, and an
+    # open-ended window cannot silently clip the newest announcements.
 
     papers = []
-    for entry in root.findall("atom:entry", ns):
-        title_el = entry.find("atom:title", ns)
-        abstract_el = entry.find("atom:summary", ns)
-        published_el = entry.find("atom:published", ns)
-        updated_el = entry.find("atom:updated", ns)
-        id_el = entry.find("atom:id", ns)
-
-        if any(el is None for el in (title_el, abstract_el, published_el, updated_el, id_el)):
-            continue
-
-        authors = []
-        for author_el in entry.findall("atom:author", ns):
-            name_el = author_el.find("atom:name", ns)
-            if name_el is not None and name_el.text:
-                authors.append(name_el.text.strip())
-
-        versioned_id = id_el.text.strip().split("/abs/")[-1]
-        base_id = re.sub(r"v\d+$", "", versioned_id)
-        version_match = re.search(r"v(\d+)$", versioned_id)
-        version = int(version_match.group(1)) if version_match else 1
-
-        try:
-            submitted = _parse_ts(published_el.text)
-            updated = _parse_ts(updated_el.text)
-        except ValueError:
-            continue
-
-        primary = entry.find("arxiv:primary_category", ns)
-        primary_cat = primary.get("term") if primary is not None else ""
-
-        papers.append(
+    with requests.Session() as session:
+        session.headers.update(
             {
-                "id": versioned_id,
-                "base_id": base_id,
-                "version": version,
-                "title": " ".join(title_el.text.split()),
-                "abstract": " ".join(abstract_el.text.split()),
-                "authors": authors,
-                "submitted": submitted,
-                "updated": updated,
-                "is_replacement": version > 1,
-                "is_crosslist": primary_cat != "quant-ph",
-                "primary_category": primary_cat,
-                "url": f"https://arxiv.org/abs/{base_id}",
+                "User-Agent": config.USER_AGENT,
+                "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
             }
         )
+        for page in range(1, config.ARXIV_OAI_MAX_PAGES + 1):
+            xml_text = _oai_request(session, params)
+            if xml_text is None:
+                # Half a harvest is worse than none: returning it would advance
+                # the state past papers we never saw. Fail and let the next run
+                # cover the window again.
+                logger.error(
+                    "OAI-PMH harvest failed on page %d; discarding %d records already read",
+                    page, len(papers),
+                )
+                return []
 
+            batch, token = parse_oai_response(xml_text)
+            papers.extend(batch)
+            logger.info("OAI-PMH page %d: %d records (%d total)", page, len(batch), len(papers))
+
+            if not token:
+                return papers
+            # A resumptionToken is only valid until the next UTC midnight, so it
+            # is used inside this loop and never persisted.
+            params = {"verb": "ListRecords", "resumptionToken": token}
+            time.sleep(OAI_PAGE_DELAY)
+
+        logger.warning(
+            "Stopped after ARXIV_OAI_MAX_PAGES=%d pages with a resumptionToken still "
+            "pending: the harvest is incomplete. Raise ARXIV_OAI_MAX_PAGES.",
+            config.ARXIV_OAI_MAX_PAGES,
+        )
     return papers
 
 
-def _parse_ts(text):
-    return datetime.datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+def _retry_after(response, default):
+    """Seconds to wait per the response's Retry-After header, else `default`."""
+    try:
+        seconds = int(response.headers.get("Retry-After", ""))
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(seconds, RETRY_AFTER_CAP))
+
+
+def _oai_request(session, params):
+    """Perform one OAI-PMH request. Returns the response body, or None."""
+    for attempt in range(1, config.ARXIV_RETRIES + 1):
+        delay = 5 * attempt
+        try:
+            response = session.get(
+                config.ARXIV_OAI_URL, params=params, timeout=config.ARXIV_TIMEOUT
+            )
+            if response.status_code == 503:
+                # OAI-PMH signals flow control, not failure, with 503 +
+                # Retry-After. Wait exactly as long as we are told to.
+                delay = _retry_after(response, delay)
+                logger.info("OAI-PMH flow control (503): waiting %ds", delay)
+            else:
+                response.raise_for_status()
+                return response.text
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            logger.warning("OAI-PMH request failed (attempt %d) with HTTP %s: %s",
+                           attempt, status, exc)
+            logger.warning("OAI-PMH response headers: %s",
+                           dict(getattr(exc.response, "headers", {}) or {}))
+            logger.warning("OAI-PMH response body (first 500 chars): %s",
+                           (getattr(exc.response, "text", "") or "")[:500])
+            if status == 429:
+                delay = _retry_after(exc.response, delay)
+            elif status is not None and 400 <= status < 500:
+                # Not transient: a rejected or malformed request stays rejected.
+                logger.error("arXiv rejected the request with HTTP %s; not retrying", status)
+                return None
+        except requests.RequestException as exc:
+            logger.warning("OAI-PMH request failed (attempt %d): %s", attempt, exc)
+
+        if attempt < config.ARXIV_RETRIES:
+            time.sleep(delay)
+        else:
+            logger.error("Giving up on the OAI-PMH request after %d attempts",
+                         config.ARXIV_RETRIES)
+    return None
+
+
+def parse_oai_response(xml_text):
+    """Parse a ListRecords response into (papers, resumption_token)."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        logger.error("Failed to parse the OAI-PMH response: %s", exc)
+        return [], None
+
+    error = root.find("oai:error", NS)
+    if error is not None:
+        code = error.get("code", "")
+        if code == "noRecordsMatch":
+            # An empty window is a legitimate answer, not a failure.
+            logger.info("OAI-PMH reports no records in the requested window")
+        else:
+            logger.error("OAI-PMH error %s: %s", code, (error.text or "").strip())
+        return [], None
+
+    list_records = root.find("oai:ListRecords", NS)
+    if list_records is None:
+        logger.error("OAI-PMH response contains no ListRecords element")
+        return [], None
+
+    papers = []
+    for record in list_records.findall("oai:record", NS):
+        paper = _parse_record(record)
+        if paper is not None:
+            papers.append(paper)
+
+    token_el = list_records.find("oai:resumptionToken", NS)
+    token = token_el.text.strip() if token_el is not None and token_el.text else None
+    return papers, token
+
+
+def _text(element):
+    return element.text.strip() if element is not None and element.text else ""
+
+
+def _norm(text):
+    """Collapse the newlines and padding arXiv wraps its text fields in."""
+    return " ".join(text.split())
+
+
+def _strip_parens(text):
+    """Drop parenthesised author affiliations, innermost group first."""
+    for _ in range(5):
+        stripped = re.sub(r"\([^()]*\)", " ", text)
+        if stripped == text:
+            break
+        text = stripped
+    return text
+
+
+def _split_top_level(text):
+    """Split on commas and ' and ' that are not inside parentheses."""
+    parts, buf, depth, i = [], [], 0, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        if depth == 0:
+            if ch == ",":
+                parts.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            if text[i:i + 5] == " and " or (i == 0 and text[i:i + 4] == "and "):
+                parts.append("".join(buf))
+                buf = []
+                i += 5 if text[i:i + 5] == " and " else 4
+                continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def parse_authors(text):
+    """Split arXivRaw's single authors string into 'Given Family' names.
+
+    arXivRaw gives one flat line - "Sakil Khan, Dipankar Home and Sachin Jain" -
+    where the Atom feed gave structured <author> elements, so the names have to
+    be recovered here. Affiliation markers and the trailing affiliation legend
+    are dropped, because _author_name_matches() keys off the *last* tokens being
+    the family name.
+    """
+    names = []
+    for part in _split_top_level(_norm(text)):
+        name = _norm(_strip_parens(part)).strip(" ,;")
+        # A pure affiliation legend, e.g. "((1) MIT, (2) Caltech)", strips empty.
+        if name and name.lower() not in ("et al.", "et al"):
+            names.append(name)
+    return names
+
+
+def _parse_versions(meta):
+    """Return (version, submitted, updated) from the <version> elements.
+
+    arXivRaw repeats <version version="vN"> with an RFC-822 <date> at second
+    resolution - the same semantics the Atom feed's published/updated carried.
+    The number of versions, not any date comparison, is what makes a paper a
+    replacement: submission and announcement routinely fall on different days,
+    so created != updated says nothing about revisions.
+    """
+    versions = []
+    for version_el in meta.findall("raw:version", NS):
+        match = re.fullmatch(r"v(\d+)", (version_el.get("version") or "").strip())
+        date_text = _text(version_el.find("raw:date", NS))
+        if not match or not date_text:
+            continue
+        try:
+            stamp = email.utils.parsedate_to_datetime(date_text)
+        except (TypeError, ValueError):
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+        versions.append((int(match.group(1)), stamp))
+
+    if not versions:
+        return None, None, None
+    versions.sort()
+    return versions[-1][0], versions[0][1], versions[-1][1]
+
+
+def _parse_record(record):
+    """Turn one OAI-PMH <record> into the pipeline's paper dict, or None."""
+    meta = record.find("oai:metadata/raw:arXivRaw", NS)
+    if meta is None:
+        # Withdrawn papers arrive as <header status="deleted"> with no metadata.
+        header = record.find("oai:header", NS)
+        identifier = _text(header.find("oai:identifier", NS)) if header is not None else "?"
+        logger.info("Skipping record without arXivRaw metadata: %s", identifier)
+        return None
+
+    base_id = _text(meta.find("raw:id", NS))
+    title = _text(meta.find("raw:title", NS))
+    version, submitted, updated = _parse_versions(meta)
+    if not base_id or not title or version is None:
+        logger.warning("Skipping malformed record (id=%r, versions=%r)", base_id, version)
+        return None
+
+    categories = _text(meta.find("raw:categories", NS)).split()
+    primary_cat = categories[0] if categories else ""
+
+    return {
+        "id": f"{base_id}v{version}",
+        "base_id": base_id,
+        "version": version,
+        "title": _norm(title),
+        "abstract": _norm(_text(meta.find("raw:abstract", NS))),
+        "authors": parse_authors(_text(meta.find("raw:authors", NS))),
+        "categories": categories,
+        "submitted": submitted,
+        "updated": updated,
+        "is_replacement": version > 1,
+        "is_crosslist": primary_cat != "quant-ph",
+        "primary_category": primary_cat,
+        "url": f"https://arxiv.org/abs/{base_id}",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -634,12 +781,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true",
                         help="print the Slack payload instead of posting")
-    parser.add_argument("--from-file", help="parse a saved arXiv API response instead of fetching")
+    parser.add_argument("--from-file",
+                        help="parse a saved OAI-PMH ListRecords response instead of fetching")
     args = parser.parse_args()
 
     last_run, sent = load_state()
     cutoff, now = get_cutoff(last_run)
-    logger.info("Window: entries updated since %s", cutoff.isoformat())
+    # OAI-PMH `from` is day-granular, so it is floored to the window's UTC date
+    # and pulled back one more day: a coarse server-side pre-filter that can only
+    # ever over-fetch. The exact window is still enforced by filter_papers(), and
+    # papers re-offered from an earlier run are dropped by their versioned id
+    # (state.json keeps 8 days of ids, longer than the 7-day maximum window).
+    harvest_from = cutoff.date() - datetime.timedelta(days=1)
+    logger.info("Window: entries updated since %s (harvesting from %s)",
+                cutoff.isoformat(), harvest_from.isoformat())
 
     if last_run is not None:
         missed = missed_weekdays(last_run, now)
@@ -652,24 +807,13 @@ def main():
 
     if args.from_file:
         with open(args.from_file) as f:
-            papers = parse_feed(f.read())
+            papers, _ = parse_oai_response(f.read())
     else:
-        papers = fetch_papers()
+        papers = fetch_papers(harvest_from)
 
     if not papers:
         logger.error("No papers retrieved from arXiv.")
         sys.exit(1)
-
-    # If we filled the request quota *and* the oldest entry is still inside the
-    # window, the response was truncated and matches were silently lost.
-    oldest = min(p["updated"] for p in papers)
-    if len(papers) >= config.ARXIV_MAX_RESULTS and oldest >= cutoff:
-        logger.warning(
-            "ARXIV_MAX_RESULTS=%d is too low: the response was capped and its oldest "
-            "entry (%s) is still inside the window, so older matches were cut off. "
-            "Raise ARXIV_MAX_RESULTS.",
-            config.ARXIV_MAX_RESULTS, oldest.isoformat(),
-        )
 
     recent = [p for p in filter_papers(papers, cutoff) if p["id"] not in sent]
     logger.info("Entries in window after dedup: %d of %d fetched", len(recent), len(papers))

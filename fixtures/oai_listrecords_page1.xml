@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- First page of a paginated harvest: one record plus a resumptionToken.
+     The token is valid only until the next UTC midnight. -->
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-08-20T03:07:09Z</responseDate>
+  <request verb="ListRecords" metadataPrefix="arXivRaw" set="physics:quant-ph" from="2026-08-19">https://oaipmh.arxiv.org/oai</request>
+  <ListRecords>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2608.11111</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/">
+          <id>2608.11111</id>
+          <submitter>Changhun Oh</submitter>
+          <version version="v1">
+            <date>Wed, 19 Aug 2026 08:00:00 GMT</date>
+            <size>221kb</size>
+            <source_type>D</source_type>
+          </version>
+          <title>Sample complexity of learning bosonic states</title>
+          <authors>Changhun Oh and Liang Jiang</authors>
+          <categories>quant-ph cs.LG</categories>
+          <abstract>  We bound the sample complexity of learning a bosonic state from
+classical shadows.
+</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+    <resumptionToken cursor="0" completeListSize="4">3721516|2501</resumptionToken>
+  </ListRecords>
+</OAI-PMH>

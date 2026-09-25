@@ -8,26 +8,28 @@ import os
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
-# How many entries to pull from the arXiv API in one request.
-# quant-ph runs roughly 150-250 announcements/day including cross-lists;
-# sorting by lastUpdatedDate also surfaces replacements, which pushes the
-# count higher. 800 gives comfortable headroom for a 3-day Monday window.
-# The API hard-caps a single request at 2000.
-ARXIV_MAX_RESULTS = int(os.environ.get("ARXIV_MAX_RESULTS", "800"))
+# arXiv's OAI-PMH endpoint. This is the interface arXiv sanctions for bulk
+# harvesting; the old Atom API at export.arxiv.org/api/query is answered with an
+# empty-bodied HTTP 406 by arXiv's edge for every command-line client.
+# (export.arxiv.org/oai2 redirects here.)
+ARXIV_OAI_URL = os.environ.get("ARXIV_OAI_URL", "https://oaipmh.arxiv.org/oai")
+
+# The OAI set to harvest. arXiv names quant-ph 'physics:quant-ph'.
+ARXIV_OAI_SET = os.environ.get("ARXIV_OAI_SET", "physics:quant-ph")
+
+# Safety valve on the resumptionToken loop. arXiv serves 2500 records per page
+# and quant-ph runs ~350/day, so even a 7-day catch-up window fits in one or two
+# pages; 20 only ever stops a runaway loop.
+ARXIV_OAI_MAX_PAGES = int(os.environ.get("ARXIV_OAI_MAX_PAGES", "20"))
 
 # Include v2+ papers (replacements) in the digest.
 INCLUDE_REPLACEMENTS = os.environ.get("INCLUDE_REPLACEMENTS", "1") not in ("0", "false", "")
 
-# Upper bound, in seconds, on the exponential backoff used when arXiv throttles
-# us (406/429/503). A throttle window can outlast a few linear retries, so the
-# delay grows 60s, 120s, 240s... until it hits this cap.
-ARXIV_THROTTLE_BACKOFF_CAP = int(os.environ.get("ARXIV_THROTTLE_BACKOFF_CAP", "300"))
-
 # Network politeness / resilience.
 ARXIV_TIMEOUT = 60
 
-# 5 attempts: for 429 the delays are 60 / 120 / 240 / 300 s (exponential, capped
-# at 5 min), giving ~12 min total wait before giving up.  For other transient
-# errors the original linear 5*n-second delays are kept.
-ARXIV_RETRIES = 5
+# Modest linear retries (5s, 10s, 15s) for genuine network errors. OAI-PMH flow
+# control arrives as 503 + Retry-After and is honoured separately; there is no
+# long throttle backoff any more, so a broken harvest fails fast and loudly.
+ARXIV_RETRIES = 4
 USER_AGENT = "arxiv-quant-ph-digest/1.0 (personal research digest; contact via GitHub)"
