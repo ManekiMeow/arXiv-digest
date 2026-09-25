@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Trimmed capture of
+     https://oaipmh.arxiv.org/oai?verb=ListRecords&metadataPrefix=arXivRaw&set=physics:quant-ph&from=2026-08-19
+     Titles, authors and abstracts are verbatim arXivRaw TeX source, taken from
+     real quant-ph records: arXivRaw serves the submitted LaTeX where the old
+     Atom API served rendered Unicode. The second record is already plain
+     Unicode, which is the common case and must pass through untouched. -->
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-08-20T03:07:11Z</responseDate>
+  <request verb="ListRecords" metadataPrefix="arXivRaw" set="physics:quant-ph" from="2026-08-19">https://oaipmh.arxiv.org/oai</request>
+  <ListRecords>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2608.20001</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/">
+          <id>2608.20001</id>
+          <submitter>Luis L. S\'anchez-Soto</submitter>
+          <version version="v1">
+            <date>Wed, 19 Aug 2026 10:03:00 GMT</date>
+            <size>734kb</size>
+            <source_type>D</source_type>
+          </version>
+          <title>Bridge of $\Psi$'s: Quantum Circuit Optimization with
+  Schr\"odinger Bridges</title>
+          <authors>Asghar Ullah, Giovanni Scala, Luis L. S\'anchez-Soto</authors>
+          <categories>quant-ph</categories>
+          <abstract>  We optimise the quadrature squeezing of $|\psi\rangle$ with a
+cost that scales as $\mathcal{O}(n^2)$, reaching 95% fidelity for
+N &lt; 10 modes.
+</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2608.20002</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/">
+          <id>2608.20002</id>
+          <submitter>Matija Medvidović</submitter>
+          <version version="v1">
+            <date>Wed, 19 Aug 2026 10:41:00 GMT</date>
+            <size>512kb</size>
+            <source_type>D</source_type>
+          </version>
+          <title>Contextuality without diacritics</title>
+          <authors>Matija Medvidović, Ángel Rubio, Juan Carrasquilla</authors>
+          <categories>quant-ph</categories>
+          <abstract>  A noncontextual model reproduces the statistics.
+</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+  </ListRecords>
+</OAI-PMH>
