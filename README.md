@@ -59,10 +59,29 @@ Mondays). Worst case you see one repeated digest, never a silent gap.
 
 ## What changed from the original script
 
-- **Replacements now appear.** The query sorts by `lastUpdatedDate` instead of
-  `submittedDate`, and the window is applied to `updated` rather than
-  `published`. As written before, a v2 could never surface: it has an old
-  `published` date and was filtered out before it was ever scored. Replacements
+- **Papers are harvested over OAI-PMH.** `export.arxiv.org/api/query` is
+  answered with an empty-bodied HTTP 406 by arXiv's edge for every command-line
+  client, so the digest reads `oaipmh.arxiv.org/oai` instead — arXiv's supported
+  bulk interface. It takes the window as a `from=YYYY-MM-DD` date and pages with
+  a `resumptionToken` rather than truncating at a fixed result count. The
+  `arXivRaw` metadata format is the one that carries per-version dates at second
+  resolution, so the window filter stays exact; `from` is only a coarse
+  pre-filter and is deliberately widened by a day.
+- **LaTeX escapes are decoded.** `arXivRaw` hands back the submitted TeX source
+  where the Atom API handed back rendered Unicode, so names reached Slack as
+  `Schr\"odinger` and `S\'anchez-Soto`. Titles, abstracts and authors are run
+  through `pylatexenc` on the way in. This is not cosmetic: the author matcher
+  below folds diacritics before comparing, and a backslash escape is not a
+  diacritic, so accented watch-list names had stopped matching *silently*.
+  Mathematics is decoded in `math_mode="verbatim"` — everything between `$...$`
+  is passed through exactly as submitted, because a half-rendered formula reads
+  worse than the TeX it came from. Bare `&`, `%` and `#`, which submitters leave
+  unescaped in prose, are protected first; unguarded, TeX reads `&` as a table
+  separator and `%` as a comment that swallows the rest of the line.
+- **Replacements now appear.** A paper counts as a replacement when its highest
+  `<version>` is above v1, and the window is applied to the newest version's
+  date rather than v1's. As written before, a v2 could never surface: it has an
+  old `published` date and was filtered out before it was ever scored. Replacements
   get their own section and are excluded from the theme buckets so they do not
   crowd out new work.
 - **`save_state` actually prunes.** It computed a `cutoff` and then never used
@@ -75,18 +94,19 @@ Mondays). Worst case you see one repeated digest, never a silent gap.
   | `Yuhao Meng` | Yu Meng | matched (wrong) | no match |
   | `Adán Cabello` | Adan Cabello | no match (wrong) | matched |
 
-  The accent case matters — arXiv renders the name as `Adán Cabello`, so that
-  watch entry never fired. Initials still work in both directions: `C.-F. Li`
+  The accent case matters — the name reaches the matcher as `Adán Cabello`
+  (`Ad\'an Cabello` before decoding), so that watch entry never fired. Initials still work in both directions: `C.-F. Li`
   matches `Chuan-Feng Li`, and `Zi-Feng Li` correctly does not.
 - **Slack's 50-block limit is respected.** A busy day could previously build a
   payload Slack rejects outright; `chunk_blocks` now splits it across messages.
-- **Truncation is visible.** If the API response is capped and its oldest entry
-  is still inside the window, you get a warning instead of a silently short
-  digest. Papers dropped by the per-section caps are counted in the footer.
-- **Retries and a User-Agent.** The arXiv API intermittently returns an empty
-  but well-formed feed; the script retries with backoff rather than exiting 1.
+- **A partial harvest is never delivered.** If a later page of the harvest
+  fails, the run exits without advancing `state.json`, so the next run covers
+  the same window again instead of skipping what it never read.
+- **Retries and a User-Agent.** OAI-PMH flow control (HTTP 503 +
+  `Retry-After`) is honoured, genuine network errors get a few short retries,
+  and anything else fails immediately with its status, headers and body logged.
 - **Cross-lists are labelled** with their primary category.
-- **`--dry-run`** prints the payload; **`--from-file`** parses a saved API
+- **`--dry-run`** prints the payload; **`--from-file`** parses a saved OAI-PMH
   response, so you can iterate on filters without hitting the network.
 
 ## Two filter notes worth a look
@@ -111,15 +131,15 @@ because they showed up in testing:
 ```bash
 pip install -r requirements.txt
 python test_digest.py                              # matcher + parser checks
-python digest.py --dry-run --from-file feed.xml    # render without posting
+python digest.py --dry-run \
+    --from-file fixtures/oai_listrecords.xml       # render without posting
 SLACK_WEBHOOK_URL=https://hooks.slack.com/... python digest.py
 ```
 
 ## Tunables
 
 All read from the environment, with the defaults in `config.py`:
-`ARXIV_MAX_RESULTS` (800), `MAX_PAPERS_PER_THEME` (8),
-`MAX_PAPERS_AUTHOR_WATCH` (15), `MAX_PAPERS_PER_THEME_REPLACEMENTS` (5),
-`INCLUDE_REPLACEMENTS` (on).
+`ARXIV_OAI_URL` (`https://oaipmh.arxiv.org/oai`), `ARXIV_OAI_SET`
+(`physics:quant-ph`), `ARXIV_OAI_MAX_PAGES` (20), `INCLUDE_REPLACEMENTS` (on).
 
 Themes and the watched-author list live at the top of `digest.py`.

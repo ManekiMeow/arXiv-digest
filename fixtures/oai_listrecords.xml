@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Trimmed capture of
+     https://oaipmh.arxiv.org/oai?verb=ListRecords&metadataPrefix=arXivRaw&set=physics:quant-ph&from=2026-08-19
+     Final page: the resumptionToken element is absent. -->
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://www.openarchives.org/OAI/2.0/ http://www.openarchives.org/OAI/2.0/OAI-PMH.xsd">
+  <responseDate>2026-08-20T03:07:11Z</responseDate>
+  <request verb="ListRecords" metadataPrefix="arXivRaw" set="physics:quant-ph" from="2026-08-19">https://oaipmh.arxiv.org/oai</request>
+  <ListRecords>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2608.17094</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  xsi:schemaLocation="http://arxiv.org/OAI/arXivRaw/ http://arxiv.org/OAI/arXivRaw.xsd">
+          <id>2608.17094</id>
+          <submitter>Adelina Barligea</submitter>
+          <version version="v1">
+            <date>Wed, 19 Aug 2026 09:41:03 GMT</date>
+            <size>1183kb</size>
+            <source_type>D</source_type>
+          </version>
+          <title>Lie-Algebraic Classical Simulation of Bosonic Systems Beyond
+  Gaussian Dynamics</title>
+          <authors>Adelina Barligea, Antonio Acin and Mikhail Lukin</authors>
+          <categories>quant-ph</categories>
+          <comments>14 pages, 10 figures</comments>
+          <license>http://arxiv.org/licenses/nonexclusive-distrib/1.0/</license>
+          <abstract>  We derive a controlled perturbative hierarchy for squeezing beyond
+exact sector confinement, valid for &lt; 10 modes, and confirm the
+predicted error orders &amp; scalings numerically.
+</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2401.00001</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/">
+          <id>2401.00001</id>
+          <submitter>Ad\'an Cabello</submitter>
+          <version version="v1">
+            <date>Mon, 1 Jan 2024 10:12:45 GMT</date>
+            <size>402kb</size>
+            <source_type>D</source_type>
+          </version>
+          <version version="v2">
+            <date>Tue, 4 Mar 2025 08:00:00 GMT</date>
+            <size>410kb</size>
+            <source_type>D</source_type>
+          </version>
+          <version version="v3">
+            <date>Wed, 19 Aug 2026 11:27:18 GMT</date>
+            <size>431kb</size>
+            <source_type>D</source_type>
+          </version>
+          <title>Device-independent randomness revisited</title>
+          <authors>Ad&#225;n Cabello, Marissa Giustina and Renato Renner</authors>
+          <categories>quant-ph</categories>
+          <journal-ref>Phys. Rev. Lett. 136, 010401 (2026)</journal-ref>
+          <doi>10.1103/PhysRevLett.136.010401</doi>
+          <abstract>  We study device-independent protocols certified by homodyne
+detection.
+</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+    <record>
+      <header>
+        <identifier>oai:arXiv.org:2608.19999</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+        <setSpec>physics:physics:optics</setSpec>
+      </header>
+      <metadata>
+        <arXivRaw xmlns="http://arxiv.org/OAI/arXivRaw/">
+          <id>2608.19999</id>
+          <submitter>Chatterjee</submitter>
+          <version version="v1">
+            <date>Wed, 19 Aug 2026 12:05:00 GMT</date>
+            <size>980kb</size>
+            <source_type>D</source_type>
+          </version>
+          <title>Synthetic lattice photonics with feedforward control</title>
+          <authors>Chatterjee, Chao-Yang Lu (1) and Yu Meng (2) ((1) USTC, (2) Nanjing University)</authors>
+          <categories>physics.optics quant-ph cond-mat.mes-hall</categories>
+          <abstract>  A synthetic lattice built with feedforward control.
+</abstract>
+        </arXivRaw>
+      </metadata>
+    </record>
+    <record>
+      <header status="deleted">
+        <identifier>oai:arXiv.org:2608.00000</identifier>
+        <datestamp>2026-08-19</datestamp>
+        <setSpec>physics:quant-ph</setSpec>
+      </header>
+    </record>
+  </ListRecords>
+</OAI-PMH>
