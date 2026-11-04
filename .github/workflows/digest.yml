@@ -11,6 +11,12 @@ on:
     # last ten runs), so 02:07 nominal actually lands around 07:20 Berlin.
     - cron: '07 0 * * 1-5'  # 00:07 UTC = 02:07 Europe/Berlin while CEST (summer)
     - cron: '07 1 * * 1-5'  # 01:07 UTC = 02:07 Europe/Berlin while CET  (winter)
+    # Catch-up, live in both seasons. It only posts if today's digest has not
+    # gone out yet (--once-per-day), i.e. when the main run failed or GitHub
+    # never fired it. On 2026-11-02 and 2026-11-03 oaipmh.arxiv.org stopped
+    # answering during the main run and, with nothing to retry later, both
+    # days were lost; on 2026-10-31 GitHub fired neither DST cron at all.
+    - cron: '37 3 * * 1-5'  # 03:37 UTC, ~2.5h after the winter main cron
   workflow_dispatch:
     inputs:
       dry_run:
@@ -25,11 +31,15 @@ concurrency:
 jobs:
   digest:
     runs-on: ubuntu-latest
+    # The harvest rides out ~20 minutes of arXiv not answering before failing;
+    # this only stops a run that hangs past that.
+    timeout-minutes: 40
     env:
-      # Must stay identical to the two `cron:` entries above - the guard
+      # Must stay identical to the three `cron:` entries above - the guard
       # compares against them verbatim.
       CRON_SUMMER: '07 0 * * 1-5'
       CRON_WINTER: '07 1 * * 1-5'
+      CRON_CATCHUP: '37 3 * * 1-5'
     steps:
       # Picks whichever of the two DST crons is the live one. This keys off
       # *which cron entry fired* rather than the wall-clock hour on the runner:
@@ -50,6 +60,12 @@ jobs:
             exit 0
           fi
 
+          if [ "$FIRED_CRON" = "$CRON_CATCHUP" ]; then
+            echo "Catch-up cron - the digest posts only if today's has not gone out yet."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           OFFSET=$(TZ=Europe/Berlin date +%z)
           if [ "$OFFSET" = "+0200" ]; then
             WANTED="$CRON_SUMMER"
@@ -62,10 +78,11 @@ jobs:
           if [ "$FIRED_CRON" = "$WANTED" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif [ "$FIRED_CRON" != "$CRON_SUMMER" ] && [ "$FIRED_CRON" != "$CRON_WINTER" ]; then
-            # The schedule was edited without updating CRON_SUMMER/CRON_WINTER.
-            # Fail open: a redundant run is deduplicated by state.json, whereas
-            # failing closed would silently stop the digest again.
-            echo "::warning::'$FIRED_CRON' matches neither CRON_SUMMER nor CRON_WINTER - running anyway. Re-sync the env block with the cron entries."
+            # The schedule was edited without updating the CRON_* env vars.
+            # Fail open: scheduled runs pass --once-per-day, so a redundant run
+            # posts nothing, whereas failing closed would silently stop the
+            # digest again.
+            echo "::warning::'$FIRED_CRON' matches none of CRON_SUMMER, CRON_WINTER, CRON_CATCHUP - running anyway. Re-sync the env block with the cron entries."
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "Off-season DST cron - skipping."
@@ -104,6 +121,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
             uv run digest.py --dry-run
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            # At most one digest per Berlin day across the main and catch-up
+            # crons. Manual runs skip this so they can always force a post.
+            uv run digest.py --once-per-day
           else
             uv run digest.py
           fi

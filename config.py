@@ -26,10 +26,22 @@ ARXIV_OAI_MAX_PAGES = int(os.environ.get("ARXIV_OAI_MAX_PAGES", "20"))
 INCLUDE_REPLACEMENTS = os.environ.get("INCLUDE_REPLACEMENTS", "1") not in ("0", "false", "")
 
 # Network politeness / resilience.
-ARXIV_TIMEOUT = 60
+# (connect, read) seconds. A healthy ListRecords page - 2-3 MB for a week of
+# quant-ph - arrives in about 3 s, so the read timeout only ever trips when the
+# server has stopped answering altogether.
+ARXIV_TIMEOUT = (15, 90)
 
-# Modest linear retries (5s, 10s, 15s) for genuine network errors. OAI-PMH flow
-# control arrives as 503 + Retry-After and is honoured separately; there is no
-# long throttle backoff any more, so a broken harvest fails fast and loudly.
-ARXIV_RETRIES = 4
+# Retries for network errors, timeouts and 5xx, with exponential backoff
+# (20s, 40s, 80s, 160s, 300s). oaipmh.arxiv.org has been seen to stop answering
+# entirely for several minutes - every request on 2026-11-02 and 2026-11-03 hit
+# the read timeout - and the old 4 x 60 s schedule gave up after ~5 minutes and
+# lost the day. This one rides out roughly 20 minutes before failing; the
+# workflow's catch-up cron then tries again a couple of hours later. OAI-PMH flow
+# control (503 + Retry-After) is honoured separately.
+ARXIV_RETRIES = 6
+ARXIV_BACKOFF_BASE = 20
+ARXIV_BACKOFF_CAP = 300
+
+# Calendar used for "has today's digest already gone out?" (--once-per-day).
+DIGEST_TZ = "Europe/Berlin"
 USER_AGENT = "arxiv-quant-ph-digest/1.0 (personal research digest; contact via GitHub)"

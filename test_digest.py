@@ -301,6 +301,68 @@ check("Fri -> Tue misses Monday", MW(at(2026, 8, 21), at(2026, 8, 25)), 1)
 check("Wed -> Fri misses Thu",    MW(at(2026, 8, 26), at(2026, 8, 28)), 1)
 check("Mon -> Mon misses Tue-Fri", MW(at(2026, 8, 17), at(2026, 8, 24)), 4)
 
+print("\n=== once-per-day guard (main + catch-up crons) ===")
+DT = digest.delivered_today
+check("never delivered",               DT(None, at(2026, 11, 4, 9, 30)), False)
+check("main run delivered this morning", DT(at(2026, 11, 4, 7, 40), at(2026, 11, 4, 9, 30)), True)
+check("last delivery was yesterday",   DT(at(2026, 11, 3, 7, 40), at(2026, 11, 4, 9, 30)), False)
+# The day is Berlin's, not UTC's: 23:30 UTC on the 3rd is already the 4th in CET.
+check("Berlin midnight, CET",          DT(at(2026, 11, 3, 23, 30), at(2026, 11, 4, 9, 30)), True)
+check("before Berlin midnight, CET",   DT(at(2026, 11, 3, 22, 30), at(2026, 11, 4, 9, 30)), False)
+# ...and 22:30 UTC is already the next day in CEST.
+check("Berlin midnight, CEST",         DT(at(2026, 7, 6, 22, 30), at(2026, 7, 7, 6, 0)), True)
+
+print("\n=== main(): --once-per-day and state handling ===")
+import tempfile
+from unittest import mock
+
+def _run_main(argv, state=None, *, papers=None, send_ok=True):
+    """Run digest.main() offline. Returns (exit code, saved state or None, fetched?)."""
+    path = os.path.join(tempfile.mkdtemp(), "state.json")
+    if state is not None:
+        with open(path, "w") as f:
+            json.dump(state, f)
+    fetched = []
+    def fake_fetch(from_date):
+        fetched.append(from_date)
+        return papers or []
+    with mock.patch.object(digest, "STATE_FILE", path), \
+         mock.patch.object(digest, "fetch_papers", fake_fetch), \
+         mock.patch.object(digest, "send_no_papers_message", lambda d: send_ok), \
+         mock.patch.object(sys, "argv", ["digest.py", *argv]):
+        try:
+            digest.main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code
+    saved = json.load(open(path)) if os.path.exists(path) else None
+    return code, saved, bool(fetched)
+
+real_now = datetime.datetime.now(datetime.timezone.utc)
+today_state = {"last_run": (real_now - datetime.timedelta(minutes=5)).isoformat(), "sent_ids": {}}
+code, saved, fetched = _run_main(["--once-per-day"], today_state)
+check("catch-up skips when today is done", (code, fetched), (0, False))
+check("catch-up leaves state untouched",  saved, today_state)
+code, saved, fetched = _run_main([], today_state)
+check("manual run is not blocked",        fetched, True)
+
+stale = {"last_run": (real_now - datetime.timedelta(days=2)).isoformat(), "sent_ids": {}}
+code, saved, fetched = _run_main(["--once-per-day"], stale)
+check("catch-up runs after a failed day", fetched, True)
+check("failed harvest fails the job",     code, 1)
+check("failed harvest keeps the state",   saved, stale)
+
+# A window with nothing to post: state only advances once Slack has the message,
+# otherwise the catch-up run would think today was already delivered.
+quiet = digest.parse_oai_response(RECORDS)[0]
+with mock.patch.object(digest, "build_digest", lambda recent: ({}, [], [])):
+    code, saved, _ = _run_main(["--once-per-day"], stale, papers=quiet, send_ok=False)
+    check("unsent 'no papers' message fails",  code, 1)
+    check("unsent 'no papers' keeps the state", saved, stale)
+    code, saved, _ = _run_main(["--once-per-day"], stale, papers=quiet, send_ok=True)
+    check("sent 'no papers' message succeeds", code, 0)
+    check("sent 'no papers' advances the state", saved["last_run"] > stale["last_run"], True)
+
 print("\n=== window filtering is still the real gate ===")
 # `from` is day-granular, so the harvest legitimately returns records from
 # before the cutoff (metadata-only edits keep their old version date).
@@ -422,16 +484,29 @@ papers, session, slept, log = _run_fetch(
 check("Retry-After honoured",         slept, [12])
 check("flow control recovers",        len(papers), 3)
 papers, session, slept, log = _run_fetch(_response(503, ""), _response(200, RECORDS))
-check("503 without Retry-After",      slept, [5])
+check("503 without Retry-After",      slept, [digest._backoff(1)])
 papers, session, slept, log = _run_fetch(
     _response(503, "", {"Retry-After": "99999"}), _response(200, RECORDS))
 check("Retry-After capped",           slept, [digest.RETRY_AFTER_CAP])
 
-# A genuine network error gets a few modest retries.
+# A genuine network error is retried after a short wait.
 papers, session, slept, log = _run_fetch(
     requests.ConnectionError("connection reset"), _response(200, RECORDS))
 check("network error retried",         len(papers), 3)
-check("modest backoff",                slept, [5])
+check("first backoff is short",        slept, [20])
+
+# 2026-11-02 / 2026-11-03: oaipmh.arxiv.org stopped answering and four read
+# timeouts in a row used up the old ~5 minute retry budget, losing both days.
+# The same four timeouts must now be ridden out.
+timeouts = [requests.ReadTimeout("Read timed out. (read timeout=60)")] * 4
+papers, session, slept, log = _run_fetch(*timeouts, _response(200, RECORDS))
+check("survives four read timeouts",   len(papers), 3)
+check("fifth attempt succeeds",        session.calls, 5)
+check("backoff grows",                 slept, [20, 40, 80, 160])
+check("retry budget rides out an outage of 15+ minutes",
+      sum(digest._backoff(a) for a in range(1, config.ARXIV_RETRIES))
+      + config.ARXIV_RETRIES * config.ARXIV_TIMEOUT[1] >= 15 * 60, True)
+check("timeouts are (connect, read)",  len(config.ARXIV_TIMEOUT), 2)
 
 # 4xx is not transient: fail fast and say exactly what came back.
 papers, session, slept, log = _run_fetch(_response(400, "badArgument: unknown set",
@@ -451,6 +526,8 @@ check("partial harvest logged",       "discarding 1 records" in log, True)
 papers, session, slept, log = _run_fetch(_response(500, "boom"))
 check("500 retried to exhaustion",    session.calls, config.ARXIV_RETRIES)
 check("500 returns empty",            papers, [])
+check("backoff capped",               slept, [20, 40, 80, 160, 300])
+check("no sleep after the last try",  len(slept), config.ARXIV_RETRIES - 1)
 
 print()
 if FAILED:

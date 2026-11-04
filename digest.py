@@ -15,6 +15,7 @@ import logging
 import argparse
 import datetime
 import unicodedata
+import zoneinfo
 import xml.etree.ElementTree as ET
 
 import requests
@@ -222,6 +223,19 @@ def missed_weekdays(last_run, now):
     return missed
 
 
+def delivered_today(last_run, now):
+    """True if the last delivered digest falls on the same DIGEST_TZ day as now.
+
+    Scheduled runs pass --once-per-day so that the catch-up cron, and the main
+    cron when GitHub delivers it after the catch-up one, post at most one digest
+    per Berlin day. last_run only advances once a digest actually reached Slack.
+    """
+    if last_run is None:
+        return False
+    tz = zoneinfo.ZoneInfo(config.DIGEST_TZ)
+    return last_run.astimezone(tz).date() == now.astimezone(tz).date()
+
+
 def get_cutoff(last_run):
     now = datetime.datetime.now(datetime.timezone.utc)
     if last_run is not None:
@@ -305,10 +319,15 @@ def _retry_after(response, default):
     return max(1, min(seconds, RETRY_AFTER_CAP))
 
 
+def _backoff(attempt):
+    """Seconds to wait after failed attempt N: 20, 40, 80, 160, 300, 300, ..."""
+    return min(config.ARXIV_BACKOFF_BASE * 2 ** (attempt - 1), config.ARXIV_BACKOFF_CAP)
+
+
 def _oai_request(session, params):
     """Perform one OAI-PMH request. Returns the response body, or None."""
     for attempt in range(1, config.ARXIV_RETRIES + 1):
-        delay = 5 * attempt
+        delay = _backoff(attempt)
         try:
             response = session.get(
                 config.ARXIV_OAI_URL, params=params, timeout=config.ARXIV_TIMEOUT
@@ -336,9 +355,11 @@ def _oai_request(session, params):
                 logger.error("arXiv rejected the request with HTTP %s; not retrying", status)
                 return None
         except requests.RequestException as exc:
-            logger.warning("OAI-PMH request failed (attempt %d): %s", attempt, exc)
+            logger.warning("OAI-PMH request failed (attempt %d of %d): %s",
+                           attempt, config.ARXIV_RETRIES, exc)
 
         if attempt < config.ARXIV_RETRIES:
+            logger.info("Retrying the OAI-PMH request in %ds", delay)
             time.sleep(delay)
         else:
             logger.error("Giving up on the OAI-PMH request after %d attempts",
@@ -827,10 +848,17 @@ def main():
                         help="print the Slack payload instead of posting")
     parser.add_argument("--from-file",
                         help="parse a saved OAI-PMH ListRecords response instead of fetching")
+    parser.add_argument("--once-per-day", action="store_true",
+                        help=f"exit quietly if a digest already went out today ({config.DIGEST_TZ})")
     args = parser.parse_args()
 
     last_run, sent = load_state()
     cutoff, now = get_cutoff(last_run)
+
+    if args.once_per_day and delivered_today(last_run, now):
+        logger.info("Today's digest already went out at %s; nothing to do.",
+                    last_run.isoformat())
+        sys.exit(0)
     # OAI-PMH `from` is day-granular, so it is floored to the window's UTC date
     # and pulled back one more day: a coarse server-side pre-filter that can only
     # ever over-fetch. The exact window is still enforced by filter_papers(), and
@@ -869,8 +897,12 @@ def main():
         if args.dry_run:
             print("(no matching papers)")
             sys.exit(0)
-        save_state(now, sent)
-        sys.exit(0 if send_no_papers_message(now.date()) else 1)
+        # Only advance the state once Slack has the message: with --once-per-day
+        # an advanced state tells the catch-up run that today is already done.
+        if send_no_papers_message(now.date()):
+            save_state(now, sent)
+            sys.exit(0)
+        sys.exit(1)
 
     total = sum(len(v) for v in theme_buckets.values())
     blocks = build_blocks(theme_buckets, author_watch, replacements,
