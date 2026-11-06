@@ -55,6 +55,24 @@ lands around 07:20 Berlin. The nominal time is set three hours earlier than the
 07:00-ish arrival that is actually wanted, precisely to absorb that delay. If
 the digest must land at an exact minute, this is the wrong scheduler.
 
+## Catch-up run
+
+A third cron, `37 3 * * 1-5` (`CRON_CATCHUP`), is live in both seasons and
+arrives a couple of hours after the main one. Every scheduled run passes
+`--once-per-day`, which exits quietly if `state.json` says a digest already
+reached Slack today (Berlin date), so on a normal day the catch-up does nothing.
+It posts only when the main run failed or never fired:
+
+- On 2026-11-02 and 2026-11-03 `oaipmh.arxiv.org` stopped answering during the
+  main run. Every request hit the read timeout, the old ~5 minute retry budget
+  ran out, and with nothing to try again later both days were lost. The same
+  request answered in ~3 s from a GitHub runner later that morning.
+- On 2026-10-31 GitHub fired neither DST cron at all.
+
+Whichever of the main and catch-up runs delivers first wins; the other skips, so
+GitHub delivering them out of order cannot double-post. Manual
+*Run workflow* dispatches do not pass `--once-per-day` and always post.
+
 ## State and de-duplication
 
 `state.json` holds the last run timestamp and the ids already posted, and is
@@ -111,8 +129,11 @@ Mondays). Worst case you see one repeated digest, never a silent gap.
   fails, the run exits without advancing `state.json`, so the next run covers
   the same window again instead of skipping what it never read.
 - **Retries and a User-Agent.** OAI-PMH flow control (HTTP 503 +
-  `Retry-After`) is honoured, genuine network errors get a few short retries,
-  and anything else fails immediately with its status, headers and body logged.
+  `Retry-After`) is honoured. Network errors, timeouts and 5xx are retried six
+  times with exponential backoff (20 s, 40 s, 80 s, 160 s, 300 s) and a
+  (15 s connect, 90 s read) timeout, which rides out roughly 20 minutes of arXiv
+  not answering before the run fails and leaves it to the catch-up cron. 4xx
+  fails immediately with its status, headers and body logged.
 - **Cross-lists are labelled** with their primary category.
 - **`--dry-run`** prints the payload; **`--from-file`** parses a saved OAI-PMH
   response, so you can iterate on filters without hitting the network.
