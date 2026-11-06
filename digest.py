@@ -174,7 +174,13 @@ STATE_MAX_AGE_DAYS = 8
 # --------------------------------------------------------------------------
 
 def load_state():
-    """Return (last_run, sent) where sent maps arXiv id -> ISO date seen."""
+    """Return (last_run, sent, last_delivered).
+
+    last_run is where the next harvest window starts: it only advances after a
+    *complete* OAI-PMH harvest was delivered. last_delivered is when anything
+    last reached Slack, including an RSS fallback digest, and is what
+    --once-per-day checks. sent maps versioned arXiv id -> ISO date seen.
+    """
     try:
         with open(STATE_FILE) as f:
             data = json.load(f)
@@ -185,12 +191,14 @@ def load_state():
             sent = {pid: last_run.isoformat() for pid in raw}
         else:
             sent = dict(raw)
-        return last_run, sent
+        delivered = data.get("last_delivered")
+        last_delivered = datetime.datetime.fromisoformat(delivered) if delivered else last_run
+        return last_run, sent, max(last_run, last_delivered)
     except (FileNotFoundError, KeyError, ValueError, TypeError):
-        return None, {}
+        return None, {}, None
 
 
-def save_state(last_run, sent):
+def save_state(last_run, sent, last_delivered=None):
     """Persist state, dropping ids older than STATE_MAX_AGE_DAYS."""
     cutoff = last_run - datetime.timedelta(days=STATE_MAX_AGE_DAYS)
     pruned = {}
@@ -205,7 +213,9 @@ def save_state(last_run, sent):
     if dropped:
         logger.info("Pruned %d state entries older than %d days", dropped, STATE_MAX_AGE_DAYS)
     with open(STATE_FILE, "w") as f:
-        json.dump({"last_run": last_run.isoformat(), "sent_ids": pruned}, f, indent=1)
+        json.dump({"last_run": last_run.isoformat(),
+                   "last_delivered": (last_delivered or last_run).isoformat(),
+                   "sent_ids": pruned}, f, indent=1)
 
 
 def missed_weekdays(last_run, now):
@@ -254,6 +264,9 @@ def get_cutoff(last_run):
 def fetch_papers(from_date=None):
     """Harvest quant-ph records from arXiv's OAI-PMH endpoint.
 
+    Returns the records, or None if the harvest failed - as opposed to [] for
+    a window that legitimately holds nothing (noRecordsMatch).
+
     OAI-PMH applies the window server-side via `from`, and pages with a
     resumptionToken. The spec allows the token to travel with *no* other
     parameter, so every page after the first is a fresh two-key query.
@@ -289,7 +302,7 @@ def fetch_papers(from_date=None):
                     "OAI-PMH harvest failed on page %d; discarding %d records already read",
                     page, len(papers),
                 )
-                return []
+                return None
 
             batch, token = parse_oai_response(xml_text)
             papers.extend(batch)
@@ -326,28 +339,30 @@ def _backoff(attempt):
 
 def _oai_request(session, params):
     """Perform one OAI-PMH request. Returns the response body, or None."""
-    for attempt in range(1, config.ARXIV_RETRIES + 1):
+    return _request(session, config.ARXIV_OAI_URL, params, "OAI-PMH", config.ARXIV_RETRIES)
+
+
+def _request(session, url, params, label, retries):
+    """GET with retries on network errors, timeouts and 5xx. Body or None."""
+    for attempt in range(1, retries + 1):
         delay = _backoff(attempt)
         try:
             response = session.get(
-                config.ARXIV_OAI_URL, params=params, timeout=config.ARXIV_TIMEOUT
+                url, params=params, timeout=config.ARXIV_TIMEOUT
             )
             if response.status_code == 503:
                 # OAI-PMH signals flow control, not failure, with 503 +
                 # Retry-After. Wait exactly as long as we are told to.
                 delay = _retry_after(response, delay)
-                logger.info("OAI-PMH flow control (503): waiting %ds", delay)
+                logger.info("%s flow control (503): waiting %ds", label, delay)
             else:
                 response.raise_for_status()
                 return response.text
         except requests.HTTPError as exc:
             status = getattr(exc.response, "status_code", None)
-            logger.warning("OAI-PMH request failed (attempt %d) with HTTP %s: %s",
-                           attempt, status, exc)
-            logger.warning("OAI-PMH response headers: %s",
-                           dict(getattr(exc.response, "headers", {}) or {}))
-            logger.warning("OAI-PMH response body (first 500 chars): %s",
-                           (getattr(exc.response, "text", "") or "")[:500])
+            logger.warning("%s request failed (attempt %d) with HTTP %s: %s", label, attempt, status, exc)
+            logger.warning("%s response headers: %s", label, dict(getattr(exc.response, "headers", {}) or {}))
+            logger.warning("%s response body (first 500 chars): %s", label, (getattr(exc.response, "text", "") or "")[:500])
             if status == 429:
                 delay = _retry_after(exc.response, delay)
             elif status is not None and 400 <= status < 500:
@@ -355,15 +370,13 @@ def _oai_request(session, params):
                 logger.error("arXiv rejected the request with HTTP %s; not retrying", status)
                 return None
         except requests.RequestException as exc:
-            logger.warning("OAI-PMH request failed (attempt %d of %d): %s",
-                           attempt, config.ARXIV_RETRIES, exc)
+            logger.warning("%s request failed (attempt %d of %d): %s", label, attempt, retries, exc)
 
-        if attempt < config.ARXIV_RETRIES:
-            logger.info("Retrying the OAI-PMH request in %ds", delay)
+        if attempt < retries:
+            logger.info("Retrying the %s request in %ds", label, delay)
             time.sleep(delay)
         else:
-            logger.error("Giving up on the OAI-PMH request after %d attempts",
-                         config.ARXIV_RETRIES)
+            logger.error("Giving up on the %s request after %d attempts", label, retries)
     return None
 
 
@@ -571,6 +584,86 @@ def _parse_record(record):
         "primary_category": primary_cat,
         "url": f"https://arxiv.org/abs/{base_id}",
     }
+
+
+# --------------------------------------------------------------------------
+# RSS fallback
+# --------------------------------------------------------------------------
+
+RSS_NS = {
+    "arxiv": "http://arxiv.org/schemas/atom",
+    "dc": "http://purl.org/dc/elements/1.1/",
+}
+RSS_RETRIES = 3
+
+
+def fetch_rss():
+    """Fetch the latest quant-ph announcement from rss.arxiv.org, or None."""
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": config.USER_AGENT})
+        xml_text = _request(session, config.ARXIV_RSS_URL, None, "RSS", RSS_RETRIES)
+    if xml_text is None:
+        return None
+    papers = parse_rss(xml_text)
+    logger.info("RSS feed: %d entries", len(papers))
+    return papers
+
+
+def parse_rss(xml_text):
+    """Parse rss.arxiv.org's feed into the same paper dicts as _parse_record().
+
+    The feed is exactly one announcement, so there is no window to apply; ids
+    are versioned like the OAI path's, so dedup against state.json still works.
+    Text fields carry the same TeX source as arXivRaw and are decoded the same way.
+    """
+    try:
+        channel = ET.fromstring(xml_text).find("channel")
+    except ET.ParseError as exc:
+        logger.error("Failed to parse the RSS feed: %s", exc)
+        return []
+    if channel is None:
+        logger.error("RSS feed has no channel element")
+        return []
+
+    papers = []
+    for item in channel.findall("item"):
+        guid = (item.findtext("guid") or "").strip()
+        match = re.fullmatch(r"(?:oai:arXiv\.org:)?(.+)v(\d+)", guid)
+        title = (item.findtext("title") or "").strip()
+        if not match or not title:
+            logger.warning("Skipping malformed RSS item (guid=%r)", guid)
+            continue
+        base_id, version = match.group(1), int(match.group(2))
+
+        # "arXiv:2611.06975v1 Announce Type: new  Abstract: ..."
+        description = item.findtext("description") or ""
+        abstract = description.split("Abstract:", 1)[1] if "Abstract:" in description else ""
+
+        announce_type = (item.findtext("arxiv:announce_type", namespaces=RSS_NS) or "").strip()
+        categories = [c.text.strip() for c in item.findall("category") if c.text]
+        primary_cat = categories[0] if categories else ""
+
+        try:
+            announced = email.utils.parsedate_to_datetime(item.findtext("pubDate") or "")
+        except (TypeError, ValueError):
+            announced = datetime.datetime.now(datetime.timezone.utc)
+
+        papers.append({
+            "id": f"{base_id}v{version}",
+            "base_id": base_id,
+            "version": version,
+            "title": _norm(_decode_latex(title)),
+            "abstract": _norm(_decode_latex(abstract)),
+            "authors": parse_authors(item.findtext("dc:creator", namespaces=RSS_NS) or ""),
+            "categories": categories,
+            "submitted": announced,
+            "updated": announced,
+            "is_replacement": announce_type.startswith("replace"),
+            "is_crosslist": primary_cat != "quant-ph",
+            "primary_category": primary_cat,
+            "url": f"https://arxiv.org/abs/{base_id}",
+        })
+    return papers
 
 
 # --------------------------------------------------------------------------
@@ -852,12 +945,12 @@ def main():
                         help=f"exit quietly if a digest already went out today ({config.DIGEST_TZ})")
     args = parser.parse_args()
 
-    last_run, sent = load_state()
+    last_run, sent, last_delivered = load_state()
     cutoff, now = get_cutoff(last_run)
 
-    if args.once_per_day and delivered_today(last_run, now):
+    if args.once_per_day and delivered_today(last_delivered, now):
         logger.info("Today's digest already went out at %s; nothing to do.",
-                    last_run.isoformat())
+                    last_delivered.isoformat())
         sys.exit(0)
     # OAI-PMH `from` is day-granular, so it is floored to the window's UTC date
     # and pulled back one more day: a coarse server-side pre-filter that can only
@@ -868,27 +961,41 @@ def main():
     logger.info("Window: entries updated since %s (harvesting from %s)",
                 cutoff.isoformat(), harvest_from.isoformat())
 
-    if last_run is not None:
-        missed = missed_weekdays(last_run, now)
+    if last_delivered is not None:
+        missed = missed_weekdays(last_delivered, now)
         if missed:
             logger.warning(
                 "No digest ran on %d scheduled weekday(s) since %s - the "
                 "schedule was skipped or never fired. This run covers the gap.",
-                missed, last_run.isoformat(),
+                missed, last_delivered.isoformat(),
             )
 
+    from_rss = False
     if args.from_file:
         with open(args.from_file) as f:
             papers, _ = parse_oai_response(f.read())
     else:
         papers = fetch_papers(harvest_from)
+        if papers is None:
+            # oaipmh.arxiv.org has gone silent for 20+ minutes at a time while
+            # the rest of arXiv stayed up. Post today's announcement from the
+            # RSS feed rather than nothing; the harvest window is left where it
+            # is, so the next successful harvest backfills any missed days.
+            logger.warning("OAI-PMH harvest failed; falling back to %s", config.ARXIV_RSS_URL)
+            papers = fetch_rss()
+            from_rss = True
 
     if not papers:
         logger.error("No papers retrieved from arXiv.")
         sys.exit(1)
 
-    recent = [p for p in filter_papers(papers, cutoff) if p["id"] not in sent]
+    in_window = papers if from_rss else filter_papers(papers, cutoff)
+    recent = [p for p in in_window if p["id"] not in sent]
     logger.info("Entries in window after dedup: %d of %d fetched", len(recent), len(papers))
+
+    # A complete harvest moves the window on. An RSS digest only covers the
+    # latest announcement, so the window stays put for the next harvest.
+    next_window = now if not from_rss else (last_run or cutoff)
 
     theme_buckets, author_watch, replacements = build_digest(recent)
 
@@ -900,18 +1007,26 @@ def main():
         # Only advance the state once Slack has the message: with --once-per-day
         # an advanced state tells the catch-up run that today is already done.
         if send_no_papers_message(now.date()):
-            save_state(now, sent)
+            for p in recent:
+                sent[p["id"]] = now.isoformat()
+            save_state(next_window, sent, now)
             sys.exit(0)
         sys.exit(1)
 
     total = sum(len(v) for v in theme_buckets.values())
     blocks = build_blocks(theme_buckets, author_watch, replacements,
                           now.date(), total, len(theme_buckets))
+    if from_rss:
+        blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
+            "arXiv's harvesting service (OAI-PMH) was unavailable, so this digest "
+            "covers only today's announcement, from the RSS feed. Any earlier "
+            "days it missed will follow once the service is back.")}]})
     fallback = (f"arXiv quant-ph Digest - {now.date()}: {total} theme papers, "
                 f"{len(author_watch)} author watch, {len(replacements)} replacements")
 
-    logger.info("Digest: %d theme papers / %d themes, %d author watch, %d replacements",
-                total, len(theme_buckets), len(author_watch), len(replacements))
+    logger.info("Digest: %d theme papers / %d themes, %d author watch, %d replacements%s",
+                total, len(theme_buckets), len(author_watch), len(replacements),
+                " (RSS fallback)" if from_rss else "")
 
     if args.dry_run:
         for i, chunk in enumerate(chunk_blocks(blocks), 1):
@@ -922,7 +1037,7 @@ def main():
     if send_slack_message(blocks, fallback):
         for p in recent:
             sent[p["id"]] = now.isoformat()
-        save_state(now, sent)
+        save_state(next_window, sent, now)
         sys.exit(0)
     sys.exit(1)
 

@@ -316,8 +316,12 @@ print("\n=== main(): --once-per-day and state handling ===")
 import tempfile
 from unittest import mock
 
-def _run_main(argv, state=None, *, papers=None, send_ok=True):
-    """Run digest.main() offline. Returns (exit code, saved state or None, fetched?)."""
+def _run_main(argv, state=None, *, papers=None, send_ok=True, rss=None, slack=None):
+    """Run digest.main() offline. Returns (exit code, saved state or None, fetched?).
+
+    papers=None makes the OAI harvest fail; rss is what the RSS fallback returns
+    (None = also failed); slack collects the blocks a digest would have posted.
+    """
     path = os.path.join(tempfile.mkdtemp(), "state.json")
     if state is not None:
         with open(path, "w") as f:
@@ -325,9 +329,15 @@ def _run_main(argv, state=None, *, papers=None, send_ok=True):
     fetched = []
     def fake_fetch(from_date):
         fetched.append(from_date)
-        return papers or []
+        return papers
+    def fake_send(blocks, fallback):
+        if slack is not None:
+            slack.append(blocks)
+        return send_ok
     with mock.patch.object(digest, "STATE_FILE", path), \
          mock.patch.object(digest, "fetch_papers", fake_fetch), \
+         mock.patch.object(digest, "fetch_rss", lambda: rss), \
+         mock.patch.object(digest, "send_slack_message", fake_send), \
          mock.patch.object(digest, "send_no_papers_message", lambda d: send_ok), \
          mock.patch.object(sys, "argv", ["digest.py", *argv]):
         try:
@@ -349,8 +359,41 @@ check("manual run is not blocked",        fetched, True)
 stale = {"last_run": (real_now - datetime.timedelta(days=2)).isoformat(), "sent_ids": {}}
 code, saved, fetched = _run_main(["--once-per-day"], stale)
 check("catch-up runs after a failed day", fetched, True)
-check("failed harvest fails the job",     code, 1)
-check("failed harvest keeps the state",   saved, stale)
+check("OAI and RSS both down fails",      code, 1)
+check("OAI and RSS both down keeps state", saved, stale)
+
+print("\n=== RSS fallback ===")
+RSS = fixture("rss_quant-ph.xml")
+rss_papers = digest.parse_rss(RSS)
+check("rss parses every item",         [p["id"] for p in rss_papers],
+      ["2611.06975v1", "2611.03699v2", "2011.04672v3", "2508.00351v3"])
+check("rss replacement from announce type",
+      [p["is_replacement"] for p in rss_papers], [False, False, True, True])
+check("rss cross-list from primary category",
+      [p["primary_category"] for p in rss_papers if p["is_crosslist"]], ["physics.chem-ph", "cs.CR"])
+check("rss authors TeX-decoded",       rss_papers[0]["authors"][-1], "Tamás Vaszary")
+check("rss abstract without preamble", rss_papers[0]["abstract"].startswith("Quantum algorithms"), True)
+check("rss same keys as OAI records",  set(rss_papers[0]), set(digest.parse_oai_response(RECORDS)[0][0]))
+check("rss garbage is empty, not a crash", digest.parse_rss("<html>"), [])
+
+# 2026-11-06: OAI-PMH silent for the whole retry budget, RSS fine.
+posted = []
+everything = lambda recent: ({"Squeezed light": list(recent)}, [], [])
+with mock.patch.object(digest, "build_digest", everything):
+    code, saved, _ = _run_main(["--once-per-day"], stale, papers=None, rss=rss_papers, slack=posted)
+check("OAI down + RSS up posts",              code, 0)
+check("RSS digest says it is partial",       "unavailable" in json.dumps(posted), True)
+check("RSS digest keeps the harvest window", saved["last_run"], stale["last_run"])
+check("RSS digest records the delivery",     saved["last_delivered"] > stale["last_run"], True)
+check("RSS papers are marked sent",          sorted(saved["sent_ids"]), sorted(p["id"] for p in rss_papers))
+code, _, fetched = _run_main(["--once-per-day"], saved)
+check("catch-up skips after an RSS delivery", (code, fetched), (0, False))
+# Next morning OAI is back: the window still starts before the outage, so the
+# missed days are harvested, and what RSS already posted is not posted again.
+code, saved2, fetched = _run_main([], saved, papers=rss_papers, slack=posted)
+check("backfill harvest runs",               fetched, True)
+check("backfill skips RSS-posted papers",    code, 0)  # all deduped -> 'no papers'
+check("backfill advances the window",        saved2["last_run"] > stale["last_run"], True)
 
 # A window with nothing to post: state only advances once Slack has the message,
 # otherwise the catch-up run would think today was already delivered.
@@ -511,7 +554,7 @@ check("timeouts are (connect, read)",  len(config.ARXIV_TIMEOUT), 2)
 # 4xx is not transient: fail fast and say exactly what came back.
 papers, session, slept, log = _run_fetch(_response(400, "badArgument: unknown set",
                                                    {"X-Edge": "fastly"}))
-check("400 gives up",                 papers, [])
+check("400 gives up",                 papers, None)
 check("400 requested exactly once",   session.calls, 1)
 check("400 never sleeps",             slept, [])
 check("400 body logged",              "badArgument: unknown set" in log, True)
@@ -519,13 +562,13 @@ check("400 headers logged",           "X-Edge" in log, True)
 
 # A failure mid-harvest discards the partial result rather than half-reporting.
 papers, session, slept, log = _run_fetch(_response(200, PAGE1), _response(400, "gone"))
-check("partial harvest discarded",    papers, [])
+check("partial harvest discarded",    papers, None)
 check("partial harvest logged",       "discarding 1 records" in log, True)
 
 # Exhausted retries on a transient error.
 papers, session, slept, log = _run_fetch(_response(500, "boom"))
 check("500 retried to exhaustion",    session.calls, config.ARXIV_RETRIES)
-check("500 returns empty",            papers, [])
+check("500 returns None",            papers, None)
 check("backoff capped",               slept, [20, 40, 80, 160, 300])
 check("no sleep after the last try",  len(slept), config.ARXIV_RETRIES - 1)
 
