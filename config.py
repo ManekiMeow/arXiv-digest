@@ -22,6 +22,12 @@ ARXIV_OAI_SET = os.environ.get("ARXIV_OAI_SET", "physics:quant-ph")
 # pages; 20 only ever stops a runaway loop.
 ARXIV_OAI_MAX_PAGES = int(os.environ.get("ARXIV_OAI_MAX_PAGES", "20"))
 
+# Fallback when the OAI-PMH harvest fails: the RSS feed of the latest daily
+# announcement. It is served separately from oaipmh.arxiv.org and stayed up
+# through the OAI outages of 2026-11-02/03/05/06. It only ever holds one day, so
+# days missed while OAI is down are backfilled by the next successful harvest.
+ARXIV_RSS_URL = os.environ.get("ARXIV_RSS_URL", "https://rss.arxiv.org/rss/quant-ph")
+
 # Include v2+ papers (replacements) in the digest.
 INCLUDE_REPLACEMENTS = os.environ.get("INCLUDE_REPLACEMENTS", "1") not in ("0", "false", "")
 

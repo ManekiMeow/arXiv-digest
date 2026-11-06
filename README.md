@@ -69,6 +69,16 @@ It posts only when the main run failed or never fired:
   request answered in ~3 s from a GitHub runner later that morning.
 - On 2026-10-31 GitHub fired neither DST cron at all.
 
+On 2026-11-06 the stall outlasted the whole ~20 minute retry budget (07:57 to
+08:16 UTC and still down at 08:28) while `arxiv.org`, `rss.arxiv.org` and the
+listing pages all answered normally. So when the harvest fails, the run now
+falls back to `rss.arxiv.org/rss/quant-ph` (`ARXIV_RSS_URL`), which holds the
+latest announcement, and posts that with a note saying it is partial. It
+records the delivery (`last_delivered`, which `--once-per-day` checks) but
+leaves the harvest window (`last_run`) where it was. The next successful OAI
+harvest therefore backfills any days the RSS feed could not cover, and skips
+what the RSS digest already posted by versioned id.
+
 Whichever of the main and catch-up runs delivers first wins; the other skips, so
 GitHub delivering them out of order cannot double-post. Manual
 *Run workflow* dispatches do not pass `--once-per-day` and always post.
